@@ -1,0 +1,12 @@
+__pycache__/
+build/
+dist/
+*.spec
+*.pyc
+kunci.json
+config.json
+download_history.json
+daily_stats.json
+Data_Chat_Masuk/
+Data_Chat_Selesai/
+Jurnal_Saran_AI.txt
