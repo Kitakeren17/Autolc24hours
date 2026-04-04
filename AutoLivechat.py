@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.0"
+APP_VERSION = "16.4.1"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -2031,38 +2031,18 @@ class BrowserAuditApp:
                     chat_cost_idr = 0.0
 
                     if mode_audit != "TIDAK PAKAI AI":
-                        # --- TAHAP 1: SCREENING CEPAT ---
-                        screening_verdict, s_in, s_out = self.screening_content(
-                            api_key_string, content, userid, chat_time, chat_date, mode_audit
+                        img_url = images[0] if images else None
+                        audit_result, t_in, t_out = self.audit_content(
+                            api_key_string, self.text_sop.get("1.0", tk.END), content,
+                            userid, chat_time, chat_date, mode_audit, links, img_url
                         )
 
-                        if screening_verdict == "STOPPED":
+                        # Jika quota habis / stopped, JANGAN proses file ini — retry nanti
+                        if audit_result in ("QUOTA_EXHAUSTED", "STOPPED"):
                             self.log(f"🔁 {filename} akan di-retry di loop berikutnya.")
                             continue
 
-                        screening_cost = ((s_in / 1000000 * self.price_input_1m) + (s_out / 1000000 * self.price_output_1m)) * self.usd_to_idr
-                        chat_cost_idr += screening_cost
-
-                        if screening_verdict == "LULUS":
-                            # Screening LULUS — skip full audit, hemat cost
-                            audit_result = f"{userid}\nTopik: Normal/Lancar\nLULUS"
-                            self.log(f"✅ Screening LULUS — skip audit detail | 💰 Rp {screening_cost:.4f}")
-                        else:
-                            # --- TAHAP 2: AUDIT DETAIL (hanya yang PERIKSA) ---
-                            self.log(f"🔎 Screening PERIKSA — lanjut audit detail...")
-                            img_url = images[0] if images else None
-                            audit_result, t_in, t_out = self.audit_content(
-                                api_key_string, self.text_sop.get("1.0", tk.END), content,
-                                userid, chat_time, chat_date, mode_audit, links, img_url
-                            )
-
-                            # Jika quota habis / stopped, JANGAN proses file ini — retry nanti
-                            if audit_result in ("QUOTA_EXHAUSTED", "STOPPED"):
-                                self.log(f"🔁 {filename} akan di-retry di loop berikutnya.")
-                                continue
-
-                            audit_cost = ((t_in / 1000000 * self.price_input_1m) + (t_out / 1000000 * self.price_output_1m)) * self.usd_to_idr
-                            chat_cost_idr += audit_cost
+                        chat_cost_idr = ((t_in / 1000000 * self.price_input_1m) + (t_out / 1000000 * self.price_output_1m)) * self.usd_to_idr
                     else:
                         audit_result = f"{userid}\nTopik: Normal/Lancar\nLULUS"
 
