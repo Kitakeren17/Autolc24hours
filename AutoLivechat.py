@@ -14,7 +14,57 @@ from datetime import datetime, timedelta
 # --- AREA ISI API KEY MANUAL (OPSIONAL) ---
 # Jika kamu malas isi di Aplikasi, kamu bisa isi langsung di sini.
 # Format: "KEY_1,KEY_2,KEY_3" (Pisah dengan koma, TANPA tanda kutip di dalam string)
-DEFAULT_API_KEYS = "" 
+DEFAULT_API_KEYS = ""
+
+# --- VERSI APLIKASI ---
+APP_VERSION = "16.4.0"
+
+# --- KONFIGURASI AUTO-UPDATE ---
+GITHUB_OWNER = "Kitakeren17"
+GITHUB_REPO = "Autolc24hours"
+UPDATE_EXE_NAME = "AutoLivechat.exe"
+
+def compare_versions(current, latest):
+    try:
+        c = [int(x) for x in current.split(".")]
+        l = [int(x) for x in latest.replace("v", "").split(".")]
+        return l > c
+    except:
+        return False
+
+def check_for_update_on_start():
+    try:
+        import subprocess
+        api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
+        resp = requests.get(api_url, timeout=10)
+        if resp.status_code != 200: return
+        data = resp.json()
+        latest_version = data.get("tag_name", "").replace("v", "")
+        if not latest_version or not compare_versions(APP_VERSION, latest_version): return
+        download_url = None
+        for asset in data.get("assets", []):
+            if asset["name"] == UPDATE_EXE_NAME:
+                download_url = asset["browser_download_url"]
+                break
+        if not download_url: return
+        jawab = messagebox.askyesno("Update Tersedia!", f"Versi baru: v{latest_version}\nVersi Anda: v{APP_VERSION}\n\nDownload dan install update?")
+        if not jawab: return
+        if not getattr(sys, 'frozen', False):
+            messagebox.showinfo("Info", "Auto-update hanya bisa di versi .exe")
+            return
+        current_exe = sys.executable
+        new_exe = current_exe + ".new"
+        resp = requests.get(download_url, stream=True, timeout=120)
+        with open(new_exe, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192): f.write(chunk)
+        bat_path = os.path.join(os.path.dirname(current_exe), "_update.bat")
+        with open(bat_path, "w") as bat:
+            bat.write(f'@echo off\necho Mengupdate AutoLivechat...\ntimeout /t 2 /nobreak >nul\n')
+            bat.write(f'del "{current_exe}"\nrename "{new_exe}" "{os.path.basename(current_exe)}"\n')
+            bat.write(f'start "" "{current_exe}"\ndel "%~f0"\n')
+        subprocess.Popen(["cmd", "/c", bat_path], creationflags=0x08000000)
+        sys.exit(0)
+    except: pass
 
 # --- LIBRARY GOOGLE SHEETS ---
 GSPREAD_AVAILABLE = False
@@ -44,7 +94,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 class BrowserAuditApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("AI Audit Robot - V16.0.0 (24H Realtime & Cost Optimized)")
+        self.root.title(f"AI Audit Robot - V{APP_VERSION} (24H Realtime & Cost Optimized)")
         self.root.geometry("1300x950")
 
         # --- TABEL HARGA PER MODEL (USD per 1M token) ---
@@ -71,10 +121,24 @@ class BrowserAuditApp:
 
         # FILE CONFIG & LOGS
         self.config_file = os.path.join(self.app_path, "config.json")
-        self.history_file = os.path.join(self.app_path, "download_history.json") 
+        self.history_file = os.path.join(self.app_path, "download_history.json")
         self.stats_file = os.path.join(self.app_path, "daily_stats.json")
-        self.sop_file = os.path.join(self.app_path, "SOP.txt") 
-        self.insight_log_file = os.path.join(self.app_path, "Jurnal_Saran_AI.txt") 
+        self.sop_file = os.path.join(self.app_path, "SOP.txt")
+        self.insight_log_file = os.path.join(self.app_path, "Jurnal_Saran_AI.txt")
+        self.download_stats_file = os.path.join(self.app_path, "download_stats.json")
+
+        # Auto-extract bundled files saat pertama kali jalan
+        if getattr(sys, 'frozen', False):
+            bundled_files = ["config.json", "SOP.txt", "SOP_TENZO_2026-03-16.txt", "kunci.json"]
+            for bf in bundled_files:
+                dest = os.path.join(self.app_path, bf)
+                if not os.path.exists(dest):
+                    src = os.path.join(sys._MEIPASS, bf)
+                    if os.path.exists(src):
+                        try:
+                            import shutil
+                            shutil.copy2(src, dest)
+                        except: pass
 
         # --- VARIABEL STATE ---
         self.driver = None
@@ -89,8 +153,13 @@ class BrowserAuditApp:
         # VAR BARU: Indeks Key Aktif & Cooldown Tracker
         self.current_key_index = 0
         self.key_cooldowns = {}  # {key_last4: waktu_expired} - track kapan key bisa dipakai lagi
+        self.saran_ai_enabled = True
+        self.audited_history = set()
+        self.audited_history_file = os.path.join(self.app_path, "audited_history.json")
 
-        self.load_stats() 
+        self.load_stats()
+        self.load_audited_history()
+        self.download_stats = self.load_download_stats()
         self.default_sop = self.load_sop_from_file()
 
         # Build GUI
@@ -163,13 +232,19 @@ class BrowserAuditApp:
         for line in lines:
             line = line.strip()
             if not line: continue
-            # Skip baris sistem/redundan
-            if any(skip in line.lower() for skip in [
+            # Skip baris sistem/redundan (PERTAHANKAN info handover/transfer/join)
+            line_lower = line.lower()
+            if any(skip in line_lower for skip in [
                 "livechat conversation transcript", "----------",
-                "sent rich message", "joined the chat",
-                "was invited", "left the chat", "chat was",
-                "was transferred", "assigned to"
+                "sent rich message"
             ]): continue
+            # Pertahankan info penting untuk deteksi handover
+            if any(keep in line_lower for keep in [
+                "joined the chat", "was transferred", "assigned to",
+                "was invited", "left the chat", "chat was"
+            ]):
+                compressed.append(f"[SYSTEM] {line.strip()}")
+                continue
             # Skip baris timestamp saja (tanpa konten)
             if re.match(r"^\((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),.*\)$", line): continue
             # Simplifikasi timestamp: "Nama (Tue, 1/13/2026, 04:37:02 pm)" → "Nama [04:37]"
@@ -255,6 +330,18 @@ class BrowserAuditApp:
         if os.path.exists(self.insight_log_file): os.startfile(self.insight_log_file)
         else: messagebox.showinfo("Info", "Jurnal masih kosong.")
 
+    def toggle_saran_ai(self):
+        self.saran_ai_enabled = not self.saran_ai_enabled
+        if self.saran_ai_enabled:
+            self.btn_saran_ai.config(text="💡 SARAN AI: ON", bg="#4CAF50")
+            self.log("💡 Saran AI diaktifkan.")
+        else:
+            self.btn_saran_ai.config(text="💡 SARAN AI: OFF", bg="#9E9E9E")
+            self.log("💡 Saran AI dinonaktifkan.")
+        # Auto-save ke config
+        try: self.save_config_silent()
+        except: pass
+
     # --- STATS ---
 
     def load_stats(self):
@@ -308,6 +395,95 @@ class BrowserAuditApp:
         self.today_stats["details"][web_name]["cost"] += cost
         if is_noteworthy: self.today_stats["details"][web_name]["failed"] += 1
         self.save_stats()
+
+    # --- DOWNLOAD STATS PER HARI ---
+
+    def load_download_stats(self):
+        if os.path.exists(self.download_stats_file):
+            try:
+                with open(self.download_stats_file, "r") as f: return json.load(f)
+            except: pass
+        return {}
+
+    def save_download_stats(self):
+        try:
+            with open(self.download_stats_file, "w") as f:
+                json.dump(self.download_stats, f, indent=2)
+        except: pass
+
+    def update_download_stats(self, date_str, downloaded, skipped, failed, archives_total=None):
+        """Update statistik download untuk tanggal tertentu."""
+        if date_str not in self.download_stats:
+            self.download_stats[date_str] = {
+                "downloaded": 0, "skipped": 0, "failed": 0,
+                "archives_total": None, "file_count": 0,
+                "last_update": ""
+            }
+        entry = self.download_stats[date_str]
+        entry["downloaded"] += downloaded
+        entry["skipped"] += skipped
+        entry["failed"] += failed
+        if archives_total is not None:
+            entry["archives_total"] = archives_total
+        # Hitung file aktual di Data_Chat_Selesai
+        entry["file_count"] = self._count_downloaded_for_date(date_str)
+        entry["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.save_download_stats()
+        self.update_download_stats_ui()
+
+    def update_download_stats_ui(self):
+        """Update tampilan download stats di UI."""
+        try:
+            text = ""
+            # Urutkan terbaru dulu, max 7 hari
+            sorted_dates = sorted(self.download_stats.keys(), reverse=True)[:7]
+            for dt in sorted_dates:
+                d = self.download_stats[dt]
+                total_dl = d.get("file_count", d.get("downloaded", 0))
+                archives = d.get("archives_total")
+                if archives:
+                    persen = min(100, (total_dl / archives * 100)) if archives > 0 else 0
+                    status = "OK" if total_dl >= archives else "KURANG"
+                    text += f"{dt}: {total_dl}/{archives} ({persen:.0f}%) [{status}]\n"
+                else:
+                    text += f"{dt}: {total_dl} chat (total archives ?)\n"
+            self.text_dl_stats.config(state="normal")
+            self.text_dl_stats.delete("1.0", tk.END)
+            self.text_dl_stats.insert("1.0", text)
+            self.text_dl_stats.config(state="disabled")
+        except: pass
+
+    def refresh_download_stats(self):
+        """Refresh: hitung ulang file aktual di Data_Chat_Selesai untuk semua tanggal yang tercatat."""
+        for date_str in list(self.download_stats.keys()):
+            actual = self._count_downloaded_for_date(date_str)
+            self.download_stats[date_str]["file_count"] = actual
+            self.download_stats[date_str]["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.save_download_stats()
+        self.update_download_stats_ui()
+        self.log("🔄 Download stats di-refresh dari file aktual.")
+
+    def show_download_stats_detail(self):
+        """Tampilkan detail download stats di popup."""
+        msg = "=== STATISTIK DOWNLOAD PER HARI ===\n\n"
+        sorted_dates = sorted(self.download_stats.keys(), reverse=True)[:14]
+        for dt in sorted_dates:
+            d = self.download_stats[dt]
+            total_dl = d.get("file_count", d.get("downloaded", 0))
+            archives = d.get("archives_total")
+            dl_new = d.get("downloaded", 0)
+            skip = d.get("skipped", 0)
+            fail = d.get("failed", 0)
+            last = d.get("last_update", "?")
+            msg += f"Tanggal: {dt}\n"
+            if archives:
+                selisih = archives - total_dl
+                msg += f"  File: {total_dl} / {archives} (kurang {selisih})\n"
+            else:
+                msg += f"  File: {total_dl} (total archives tidak diketahui)\n"
+            msg += f"  Download: {dl_new} | Skip: {skip} | Gagal: {fail}\n"
+            msg += f"  Update: {last}\n\n"
+        messagebox.showinfo("Download Stats", msg)
 
     # --- UI SETUP ---
 
@@ -389,6 +565,17 @@ class BrowserAuditApp:
         tk.Button(btn_box, text="📒 JURNAL", command=self.open_journal_file, bg="#795548", fg="white").pack(side="left", fill="x", expand=True, padx=1)
         tk.Button(btn_box, text="📤 REKAP", command=self.send_rekap_telegram, bg="#2196F3", fg="white").pack(side="left", fill="x", expand=True, padx=1)
         tk.Button(btn_box, text="🧹 CLEAN", command=self.manual_cleanup, bg="#FF9800", fg="white").pack(side="left", fill="x", expand=True, padx=1)
+        self.btn_saran_ai = tk.Button(btn_box, text="💡 SARAN AI: ON", command=self.toggle_saran_ai, bg="#4CAF50", fg="white")
+        self.btn_saran_ai.pack(side="left", fill="x", expand=True, padx=1)
+
+        # --- PANEL DOWNLOAD STATS PER HARI ---
+        dl_stat_f = tk.LabelFrame(left_p, text="📥 DOWNLOAD PER HARI", bg="#E8F5E9", padx=10, pady=5); dl_stat_f.pack(fill="x", pady=5)
+        self.text_dl_stats = tk.Text(dl_stat_f, height=5, bg="white", font=("Consolas", 8), state="disabled"); self.text_dl_stats.pack(fill="x", pady=2)
+        dl_btn_box = tk.Frame(dl_stat_f, bg="#E8F5E9"); dl_btn_box.pack(fill="x")
+        tk.Button(dl_btn_box, text="📋 DETAIL", command=self.show_download_stats_detail, bg="#388E3C", fg="white").pack(side="left", fill="x", expand=True, padx=1)
+        tk.Button(dl_btn_box, text="🔄 REFRESH", command=self.refresh_download_stats, bg="#1976D2", fg="white").pack(side="left", fill="x", expand=True, padx=1)
+        # Load data awal
+        self.root.after(500, self.update_download_stats_ui)
 
         tk.Label(left_p, text="SOP (Aturan AI):").pack(anchor="w")
         self.text_sop = scrolledtext.ScrolledText(left_p, height=8); self.text_sop.pack(fill="x", pady=5); self.text_sop.insert("1.0", self.default_sop)
@@ -410,8 +597,15 @@ class BrowserAuditApp:
             # Suppress log noise (TensorFlow, GCM, etc.)
             options.add_argument("--log-level=3")
             options.add_argument("--disable-logging")
-            options.add_argument("--disable-features=MediaRouter")
-            options.add_experimental_option("excludeSwitches", ["enable-logging"])
+            options.add_argument("--disable-features=MediaRouter,SafeBrowsingEnhancedProtection")
+            options.add_argument("--disable-extensions")
+            options.add_argument("--disable-default-apps")
+            options.add_argument("--no-first-run")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--safebrowsing-disable-download-protection")
+            options.add_argument("--disable-client-side-phishing-detection")
+            options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
+            options.add_experimental_option("useAutomationExtension", False)
             download_dir = os.path.abspath(self.local_in).replace("/", "\\")
             if not os.path.exists(download_dir): os.makedirs(download_dir)
             self.log(f"📂 Download folder: {download_dir}")
@@ -420,7 +614,10 @@ class BrowserAuditApp:
                 "download.prompt_for_download": False,
                 "download.directory_upgrade": True,
                 "safebrowsing.enabled": True,
-                "profile.default_content_setting_values.automatic_downloads": 1
+                "safebrowsing.disable_download_protection": True,
+                "profile.default_content_setting_values.automatic_downloads": 1,
+                "profile.default_content_setting_values.images": 2,
+                "profile.managed_default_content_settings.images": 2,
             }
             options.add_experimental_option("prefs", prefs)
             # ChromeDriver: coba install, jika Access Denied pakai yang sudah ada
@@ -439,6 +636,7 @@ class BrowserAuditApp:
             service.creation_flags = 0x08000000  # CREATE_NO_WINDOW - hide chromedriver console
             self.driver = webdriver.Chrome(service=service, options=options)
             self.driver.set_script_timeout(120)  # 120 detik untuk execute_script (default 30s terlalu pendek)
+            self.driver.set_page_load_timeout(60)  # max 60 detik load halaman
             self.driver.get("https://my.livechatinc.com/archives")
             email = self.entry_lc_email.get(); pss = self.entry_lc_password.get()
             if email and pss: threading.Thread(target=self.perform_auto_login, args=(email, pss), daemon=True).start()
@@ -465,7 +663,8 @@ class BrowserAuditApp:
             threading.Thread(target=self.run_clicker_loop, args=(interval,), daemon=True).start()
 
     def scroll_load_all_chats(self, sel_list, max_scroll=1000):
-        """Scroll sampai semua chat termuat (max 3000+). Turbo mode: batch scroll."""
+        """Scroll sampai semua chat termuat. Stabil & hemat memory."""
+
         last_count = 0
         stable_rounds = 0
 
@@ -473,8 +672,8 @@ class BrowserAuditApp:
             if not self.is_auto_clicking and not self.is_date_mode and not self.is_monitoring and not self.is_auto_today:
                 break
 
-            # TURBO: 3x rapid scroll sebelum cek count (hemat waktu 3x lipat)
-            for _ in range(3):
+            # Scroll 2x per round (cukup, tidak perlu agresif)
+            for _ in range(2):
                 try:
                     list_el = self.driver.find_element(By.CSS_SELECTOR, sel_list)
                     self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", list_el)
@@ -483,9 +682,9 @@ class BrowserAuditApp:
                         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                     except Exception:
                         pass
-                time.sleep(0.3)  # Jeda minimal antar rapid scroll
+                time.sleep(0.3)
 
-            time.sleep(0.5)  # Jeda singkat sebelum hitung
+            time.sleep(0.5)
 
             try:
                 current_count = len(self.driver.find_elements(By.CSS_SELECTOR, f"{sel_list} li"))
@@ -494,12 +693,18 @@ class BrowserAuditApp:
 
             if current_count == last_count:
                 stable_rounds += 1
-                if stable_rounds >= 5:
-                    break  # 5x batch tidak bertambah = selesai
+                if stable_rounds >= 8:
+                    break
             else:
                 stable_rounds = 0
-                if current_count % 200 == 0 or current_count - last_count > 30:
+                if current_count % 100 == 0 or current_count - last_count > 30:
                     self.log(f"📜 {current_count} chat termuat...")
+
+                # Setiap 500 chat, jeda 3 detik agar Chrome tidak overload
+                if current_count % 500 == 0 and current_count > 0:
+                    self.log(f"⏸️ Jeda 3 detik — beri Chrome waktu bernapas ({current_count} chat)...")
+                    time.sleep(3)
+
             last_count = current_count
 
         self.log(f"📋 Total termuat: {last_count} chat.")
@@ -599,6 +804,9 @@ class BrowserAuditApp:
 
                 if batch_new_ids: self.save_history()
                 self.log(f"✅ SELESAI SCAN: ⬇️ {downloaded} baru | ⏭ {skipped} sudah ada | ❌ {failed} gagal | Total: {total_loaded}")
+                if downloaded > 0:
+                    scan_date = datetime.now().strftime("%Y-%m-%d")
+                    self.update_download_stats(scan_date, downloaded, skipped, failed)
             except Exception as e: self.log(f"❌ Error Downloader: {e}")
             time.sleep(interval)
 
@@ -813,12 +1021,15 @@ class BrowserAuditApp:
         for scroll_num in range(500):
             if not self.is_date_mode: break
 
-            try:
-                list_el = self.driver.find_element(By.CSS_SELECTOR, sel_list)
-                self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", list_el)
-            except:
-                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1)
+            # Rapid scroll 5x sebelum cek
+            for _ in range(5):
+                try:
+                    list_el = self.driver.find_element(By.CSS_SELECTOR, sel_list)
+                    self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", list_el)
+                except:
+                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(0.1)
+            time.sleep(0.3)
 
             items = self.driver.find_elements(By.CSS_SELECTOR, f"{sel_list} li")
             current_count = len(items)
@@ -994,6 +1205,7 @@ class BrowserAuditApp:
 
             self.save_history()
             self.log(f"✅ {mode} ({date_display}) SELESAI: ⬇️ {downloaded} | ⏭ {skipped} skip | ❌ {failed} gagal | Total: {last_total}")
+            self.update_download_stats(date_display, downloaded, skipped, failed)
             self.is_date_mode = False
         except Exception as e:
             self.log(f"❌ Error Date Mode: {e}")
@@ -1029,8 +1241,34 @@ class BrowserAuditApp:
                 try:
                     downloaded = self._download_one_day("Today")
                 except Exception as e:
-                    self.log(f"❌ Error download {current_date}: {e}")
+                    err_str = str(e).lower()
+                    self.log(f"❌ Error download {current_date}: {str(e)[:80]}")
                     downloaded = 0
+                    # Auto-recovery: jika Chrome crash, buka ulang otomatis
+                    if any(k in err_str for k in ["connectionpool", "read timed", "no such window",
+                            "session not created", "unable to connect", "connection refused",
+                            "chrome not reachable", "invalid session", "target window already closed"]):
+                        self.log("🔄 Chrome crash terdeteksi. Membuka Chrome baru otomatis...")
+                        try:
+                            if self.driver:
+                                try: self.driver.quit()
+                                except: pass
+                                self.driver = None
+                            time.sleep(3)
+                            self.open_chrome()
+                            time.sleep(5)
+                            # Tunggu login selesai
+                            for _ in range(12):
+                                try:
+                                    if "archives" in self.driver.current_url or "my.livechatinc" in self.driver.current_url:
+                                        break
+                                except: pass
+                                time.sleep(5)
+                            self.log("✅ Chrome baru siap. Lanjut download...")
+                            continue  # retry download
+                        except Exception as re_err:
+                            self.log(f"❌ Gagal restart Chrome: {str(re_err)[:60]}")
+                            break
 
                 if not self.is_auto_today:
                     break
@@ -1038,7 +1276,18 @@ class BrowserAuditApp:
                 # Cek apakah sudah ganti hari
                 new_date = datetime.now().strftime("%Y-%m-%d")
                 if new_date != current_date:
-                    self.log(f"🌅 Hari baru terdeteksi: {new_date} — lanjut download!")
+                    self.log(f"🌅 Hari baru terdeteksi: {new_date}")
+                    # Download sisa hari kemarin dulu (Yesterday) sebelum pindah
+                    self.log(f"📥 Selesaikan download sisa {current_date} (Yesterday) dulu...")
+                    try:
+                        yesterday_dl = self._download_one_day("Yesterday")
+                        if yesterday_dl and yesterday_dl > 0:
+                            self.log(f"✅ {yesterday_dl} chat sisa {current_date} berhasil didownload.")
+                        else:
+                            self.log(f"✅ Tidak ada chat tersisa di {current_date}.")
+                    except Exception as e:
+                        self.log(f"⚠️ Error download sisa yesterday: {str(e)[:60]}")
+                    self.log(f"➡️ Lanjut ke hari baru: {new_date}")
                     break
 
                 # Masih hari yang sama — tunggu 5 menit lalu cek chat baru
@@ -1059,109 +1308,300 @@ class BrowserAuditApp:
         self.btn_auto_today.config(text="🔄 AUTO TODAY 24H", bg="#1565C0")
         self.log("⏹ AUTO TODAY 24H berhenti total.")
 
+    def _get_archives_total(self):
+        """Baca total chat dari halaman LiveChat archives (jika ditampilkan di UI)."""
+        try:
+            # Coba cari elemen yang menampilkan total/count di halaman archives
+            total_selectors = [
+                "//*[contains(@class, 'counter')]",
+                "//*[contains(@class, 'badge')]",
+                "//*[contains(@class, 'total')]",
+                "//*[contains(@class, 'count')]",
+                "//*[contains(text(), 'of ')]",
+                "//*[contains(text(), 'results')]",
+                "//*[contains(text(), 'chats')]",
+            ]
+            for xpath in total_selectors:
+                try:
+                    els = self.driver.find_elements(By.XPATH, xpath)
+                    for el in els:
+                        txt = el.text.strip()
+                        # Cari angka dalam teks (misal "1,234 chats" atau "Showing 1 of 2500")
+                        nums = re.findall(r'[\d,]+', txt)
+                        for n in nums:
+                            num = int(n.replace(',', ''))
+                            if num > 50:  # kemungkinan total chat
+                                return num
+                except: continue
+        except: pass
+        return None
+
+    def _count_downloaded_for_date(self, date_str):
+        """Hitung berapa file yang sudah didownload untuk tanggal tertentu."""
+        total = 0
+        # Hitung di Data_Chat_Selesai (semua web_name)
+        for web_name in os.listdir(self.local_out):
+            web_path = os.path.join(self.local_out, web_name)
+            if not os.path.isdir(web_path): continue
+            date_path = os.path.join(web_path, date_str)
+            if os.path.isdir(date_path):
+                # Hitung file .txt langsung + di subfolder Batch
+                for root, dirs, files in os.walk(date_path):
+                    total += len([f for f in files if f.endswith(".txt")])
+        # Hitung file di Data_Chat_Masuk/{date_str}/ (subfolder tanggal)
+        masuk_date_path = os.path.join(self.local_in, date_str)
+        if os.path.isdir(masuk_date_path):
+            total += len([f for f in os.listdir(masuk_date_path) if f.endswith(".txt")])
+        # Backward compatible: cek juga file di root Data_Chat_Masuk yang belum dipindah
+        try:
+            for f in os.listdir(self.local_in):
+                fpath = os.path.join(self.local_in, f)
+                if f.endswith(".txt") and os.path.isfile(fpath):
+                    try:
+                        with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+                            if date_str in fh.read(500):
+                                total += 1
+                    except: pass
+        except: pass
+        return total
+
     def _download_one_day(self, mode):
-        """Download semua chat untuk 1 hari (Today/Yesterday). Reuse dari date_mode_logic tapi tanpa set is_date_mode=False di akhir."""
+        """Download semua chat untuk 1 hari (Today/Yesterday).
+        Fixed v2: no infinite loop, fast-skip, day-change aware, memory-safe refresh."""
         try:
             target_date = datetime.now() if mode == "Today" else datetime.now() - timedelta(days=1)
             date_display = target_date.strftime("%Y-%m-%d")
 
-            self.driver.get("https://my.livechatinc.com/archives")
-            time.sleep(5)
-            self.log(f"🗓️ {mode} ({date_display}): Buka archives...")
+            downloaded = 0
+            skipped = 0
+            failed = 0
+            no_new_rounds = 0
+            archives_total = None
+            CLICK_BEFORE_REFRESH = 400  # refresh setiap 400 klik (bukan per item)
 
-            filter_ok = self.apply_livechat_filter(mode)
-            if filter_ok:
-                self.log(f"✅ Filter {mode} aktif. Semua chat di halaman = {date_display}")
-                time.sleep(3)
-            else:
-                self.log(f"⚠️ Filter UI gagal. Chat mungkin campur tanggal.")
-
-            SEL_LIST = self.find_chat_list_selector()
-            if not SEL_LIST:
-                time.sleep(5)
-                SEL_LIST = self.find_chat_list_selector()
-            if not SEL_LIST:
-                self.log(f"⚠️ Tidak ada chat ditemukan untuk {date_display}.")
-                return
-
-            downloaded = 0; skipped = 0; failed = 0
-            processed_idx = 0
-            stable_rounds = 0
-            last_total = 0
-
-            self.log(f"🚀 Mulai scroll + download bersamaan untuk {date_display}...")
-
-            # --- Scroll batch + download item yang visible (atas ke bawah) ---
+            # === OUTER LOOP: buka archives → scroll → download → refresh jika perlu ===
             while self.is_auto_today:
-                # Scroll batch (3x rapid scroll)
-                for _ in range(3):
-                    try:
-                        list_el = self.driver.find_element(By.CSS_SELECTOR, SEL_LIST)
-                        self.driver.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight;", list_el)
-                    except Exception:
-                        try:
-                            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                        except Exception:
-                            pass
-                    time.sleep(0.3)
-                time.sleep(0.5)
 
-                # Hitung total item sekarang
-                try:
-                    current_items = self.driver.find_elements(By.CSS_SELECTOR, f"{SEL_LIST} li")
-                    current_total = len(current_items)
-                except Exception:
-                    continue
-
-                if current_total > last_total:
-                    self.log(f"📜 {current_total} chat termuat...")
-                    stable_rounds = 0
-                else:
-                    stable_rounds += 1
-
-                # Download semua item baru (dari processed_idx sampai current_total)
-                while processed_idx < current_total and self.is_auto_today:
-                    result = self._try_download_item(SEL_LIST, processed_idx, current_total, downloaded, skipped, failed)
-                    if result == "downloaded":
-                        downloaded += 1
-                    elif result == "skipped":
-                        skipped += 1
-                    else:
-                        failed += 1
-
-                    processed_idx += 1
-
-                    if downloaded > 0 and downloaded % 25 == 0:
-                        self.save_history()
-                        self.log(f"💾 Saved: ⬇️{downloaded} / ~{current_total}")
-
-                last_total = current_total
-
-                # Selesai jika sudah 5x scroll tanpa item baru DAN semua item sudah diproses
-                if stable_rounds >= 5 and processed_idx >= current_total:
+                # --- CEK GANTI HARI ---
+                if mode == "Today" and datetime.now().strftime("%Y-%m-%d") != date_display:
+                    self.log(f"🌅 Hari berganti saat download. Stop {date_display}.")
                     break
 
+                # --- BUKA ARCHIVES + FILTER ---
+                self.driver.get("https://my.livechatinc.com/archives")
+                time.sleep(5)
+                self.log(f"🗓️ {mode} ({date_display}): Buka archives...")
+
+                filter_ok = self.apply_livechat_filter(mode)
+                if filter_ok:
+                    self.log(f"✅ Filter {mode} aktif.")
+                    time.sleep(3)
+                else:
+                    self.log(f"⚠️ Filter UI gagal. Chat mungkin campur tanggal.")
+
+                # --- CEK PROGRESS ---
+                archives_total = self._get_archives_total()
+                already_downloaded = self._count_downloaded_for_date(date_display)
+                if archives_total:
+                    remaining = max(0, archives_total - already_downloaded)
+                    self.log(f"📊 Archives={archives_total} | Downloaded={already_downloaded} | Sisa={remaining}")
+                    if remaining == 0:
+                        self.log(f"✅ Semua chat {date_display} sudah terdownload!")
+                        return downloaded
+                else:
+                    self.log(f"📊 Sudah download={already_downloaded} (total archives tidak terdeteksi)")
+
+                SEL_LIST = self.find_chat_list_selector()
+                if not SEL_LIST:
+                    time.sleep(5)
+                    SEL_LIST = self.find_chat_list_selector()
+                if not SEL_LIST:
+                    self.log(f"⚠️ Tidak ada chat ditemukan untuk {date_display}.")
+                    return downloaded
+
+                # === INNER LOOP: scroll + download incremental ===
+                round_dl = 0
+                processed_idx = 0
+                stable_rounds = 0
+                last_total = 0
+                items_clicked = 0
+                timeout_count = 0
+                need_refresh = False
+
+                self.log(f"🚀 Scroll + download {date_display}...")
+
+                while self.is_auto_today and not need_refresh:
+                    # Cek ganti hari setiap iterasi scroll
+                    if mode == "Today" and datetime.now().strftime("%Y-%m-%d") != date_display:
+                        self.log(f"🌅 Hari berganti. Stop scroll.")
+                        break
+
+                    # --- SCROLL untuk load item baru ---
+                    for _ in range(3):
+                        try:
+                            list_el = self.driver.find_element(By.CSS_SELECTOR, SEL_LIST)
+                            self.driver.execute_script(
+                                "arguments[0].scrollTop = arguments[0].scrollHeight;", list_el)
+                        except Exception:
+                            try:
+                                self.driver.execute_script(
+                                    "window.scrollTo(0, document.body.scrollHeight);")
+                            except Exception:
+                                pass
+                        time.sleep(0.3)
+                    time.sleep(0.5)
+
+                    try:
+                        current_items = self.driver.find_elements(
+                            By.CSS_SELECTOR, f"{SEL_LIST} li")
+                        current_total = len(current_items)
+                    except Exception:
+                        continue
+
+                    if current_total > last_total:
+                        stable_rounds = 0
+                        if current_total % 100 == 0:
+                            self.log(f"📜 {current_total} chat termuat...")
+                        # Jeda setiap 500 item agar Chrome bernapas
+                        if current_total % 500 == 0 and current_total > 0:
+                            time.sleep(2)
+                    else:
+                        stable_rounds += 1
+
+                    # --- DOWNLOAD item baru ---
+                    while processed_idx < current_total and self.is_auto_today:
+                        # Cek ganti hari setiap 100 item
+                        if processed_idx % 100 == 0 and mode == "Today":
+                            if datetime.now().strftime("%Y-%m-%d") != date_display:
+                                break
+
+                        # FAST-SKIP: extract chat_id dari href, tanpa klik
+                        chat_id = self._extract_chat_id_from_item(SEL_LIST, processed_idx)
+                        if chat_id and chat_id in self.processed_history:
+                            skipped += 1
+                            processed_idx += 1
+                            if skipped % 200 == 0:
+                                self.log(f"⏭ Fast-skip: {skipped} sudah ada | idx: {processed_idx}/{current_total}")
+                            continue
+
+                        # PERLU KLIK — download atau cek manual
+                        result = self._try_download_item(
+                            SEL_LIST, processed_idx, current_total,
+                            downloaded, skipped, failed)
+
+                        items_clicked += 1
+
+                        if result == "downloaded":
+                            downloaded += 1
+                            round_dl += 1
+                            timeout_count = 0
+                        elif result == "skipped":
+                            skipped += 1
+                            timeout_count = 0
+                        elif result == "timeout":
+                            timeout_count += 1
+                            failed += 1
+                            self.log(f"⚠️ Timeout #{timeout_count}")
+                            if timeout_count >= 3:
+                                self.log("❌ 3x timeout. Trigger refresh...")
+                                need_refresh = True
+                                break
+                        else:
+                            failed += 1
+                            timeout_count = 0
+
+                        processed_idx += 1
+
+                        # Save progress berkala
+                        if downloaded > 0 and downloaded % 25 == 0:
+                            self.save_history()
+                            self.log(f"💾 Progress: ⬇️{downloaded} | ⏭{skipped} | ❌{failed}")
+
+                        # Refresh setelah N klik (cegah Chrome Aw Snap)
+                        if items_clicked >= CLICK_BEFORE_REFRESH:
+                            self.log(f"🧹 {items_clicked} klik tercapai, refresh Chrome...")
+                            need_refresh = True
+                            break
+
+                    last_total = current_total
+
+                    # Semua item diproses & scroll stabil = round selesai
+                    if stable_rounds >= 5 and processed_idx >= current_total:
+                        break
+
+                # --- AKHIR ROUND ---
+                self.save_history()
+                self.log(f"✅ Round: ⬇️{round_dl} baru | ⏭ skip | Total download: ⬇️{downloaded} | Klik: {items_clicked}")
+
+                # Cek apakah masih ada chat baru
+                if round_dl == 0:
+                    no_new_rounds += 1
+                    if no_new_rounds >= 2:
+                        self.log(f"✅ {no_new_rounds}x tidak ada chat baru. Download {date_display} selesai.")
+                        break
+                else:
+                    no_new_rounds = 0
+
+            # === VERIFIKASI AKHIR & CATAT STATS ===
             self.save_history()
-            self.log(f"✅ {mode} ({date_display}) SELESAI: ⬇️ {downloaded} | ⏭ {skipped} skip | ❌ {failed} gagal | Total: {last_total}")
+            final_downloaded = self._count_downloaded_for_date(date_display)
+            if archives_total:
+                selisih = archives_total - final_downloaded
+                if selisih <= 0:
+                    self.log(f"✅ {mode} ({date_display}) LENGKAP: {final_downloaded}/{archives_total} chat | ⬇️{downloaded} baru")
+                else:
+                    self.log(f"⚠️ {mode} ({date_display}) BELUM LENGKAP: {final_downloaded}/{archives_total} (kurang {selisih}) | ⬇️{downloaded} baru")
+            else:
+                self.log(f"✅ {mode} ({date_display}) SELESAI: {final_downloaded} terdownload | ⬇️{downloaded} baru")
+
+            # Catat ke download stats per hari
+            self.update_download_stats(date_display, downloaded, skipped, failed, archives_total)
+
             return downloaded
 
         except Exception as e:
             self.log(f"❌ Error download hari {mode}: {e}")
             return 0
 
+    def _check_driver_alive(self):
+        """Cek apakah ChromeDriver masih responsif."""
+        try:
+            self.driver.title
+            return True
+        except Exception:
+            return False
+
+    def _recover_driver(self):
+        """Coba recover ChromeDriver jika connection timeout."""
+        try:
+            self.log("🔄 ChromeDriver timeout, mencoba recover...")
+            # Tunggu Chrome stabil
+            time.sleep(5)
+            if self._check_driver_alive():
+                self.log("✅ ChromeDriver pulih!")
+                # Refresh halaman archives
+                self.driver.get("https://my.livechatinc.com/archives")
+                time.sleep(5)
+                return True
+            else:
+                self.log("❌ ChromeDriver tidak merespon.")
+                return False
+        except Exception as e:
+            self.log(f"❌ Recover gagal: {str(e)[:60]}")
+            return False
+
     def _try_download_item(self, sel_list, idx, total, downloaded, skipped, failed):
-        """Coba download 1 item dari list. Return: 'downloaded', 'skipped', 'failed'."""
+        """Coba download 1 item dari list. Return: 'downloaded', 'skipped', 'failed', 'timeout'."""
         MAX_RETRIES = 3
         for attempt in range(MAX_RETRIES):
             try:
                 # Scroll container ke posisi item dulu (penting untuk virtual list)
                 try:
                     list_el = self.driver.find_element(By.CSS_SELECTOR, sel_list)
-                    # Estimasi posisi scroll berdasarkan index
                     self.driver.execute_script(
                         "var el=arguments[0]; var h=el.scrollHeight; var t=arguments[1]; var total=arguments[2]; "
                         "el.scrollTop = Math.max(0, (h * t / total) - 200);", list_el, idx, max(total, 1))
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                 except Exception:
                     pass
 
@@ -1170,14 +1610,14 @@ class BrowserAuditApp:
                     return "failed"
                 item = items[idx]
 
-                if idx % 20 == 0:
+                if idx % 50 == 0:
                     self.log(f"📌 {idx+1}/{total} | ⬇️{downloaded} ⏭{skipped} ❌{failed}")
 
                 try:
                     self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", item)
                 except Exception:
                     pass
-                time.sleep(0.3)
+                time.sleep(0.1)
 
                 try:
                     self.driver.execute_script("arguments[0].click();", item)
@@ -1186,11 +1626,11 @@ class BrowserAuditApp:
                         item.click()
                     except Exception:
                         if attempt < MAX_RETRIES - 1:
-                            time.sleep(1)
+                            time.sleep(0.5)
                             continue
                         return "failed"
 
-                time.sleep(1.5)
+                time.sleep(0.8)
                 c_id = self.driver.current_url.split("/")[-1].split("?")[0]
                 if not c_id or c_id == "archives":
                     if attempt < MAX_RETRIES - 1:
@@ -1215,12 +1655,104 @@ class BrowserAuditApp:
                     continue
                 return "failed"
             except Exception as e:
+                err_str = str(e).lower()
+                # Deteksi connection timeout ke ChromeDriver
+                if "connectionpool" in err_str or "read timed" in err_str or "max retries" in err_str or "connection refused" in err_str:
+                    self.log(f"⚠️ ChromeDriver timeout item {idx+1}, tunggu 10s lalu retry...")
+                    time.sleep(10)
+                    if not self._check_driver_alive():
+                        if self._recover_driver():
+                            continue  # retry setelah recover
+                        return "timeout"  # sinyal ke caller untuk stop sementara
+                    # Driver masih hidup, retry
+                    if attempt < MAX_RETRIES - 1:
+                        continue
+                    return "failed"
                 self.log(f"⚠️ Item {idx} attempt {attempt+1}: {str(e)[:60]}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
                     continue
                 return "failed"
         return "failed"
+
+    def _extract_chat_id_from_item(self, sel_list, idx):
+        """Extract chat_id dari list item TANPA klik (via href). Return None jika gagal."""
+        try:
+            items = self.driver.find_elements(By.CSS_SELECTOR, f"{sel_list} li")
+            if idx >= len(items): return None
+            item = items[idx]
+            # Coba dari <a href="/archives/CHAT_ID">
+            try:
+                links = item.find_elements(By.CSS_SELECTOR, "a[href*='/archives/']")
+                for link in links:
+                    href = link.get_attribute("href") or ""
+                    if "/archives/" in href:
+                        cid = href.split("/archives/")[-1].split("?")[0].split("/")[0]
+                        if cid and cid != "archives" and len(cid) > 3:
+                            return cid
+            except: pass
+            # Coba dari <a> biasa
+            try:
+                links = item.find_elements(By.TAG_NAME, "a")
+                for link in links:
+                    href = link.get_attribute("href") or ""
+                    if "/archives/" in href:
+                        cid = href.split("/")[-1].split("?")[0]
+                        if cid and cid != "archives" and len(cid) > 3:
+                            return cid
+            except: pass
+            # Coba data attribute
+            try:
+                for attr in ["data-id", "data-chat-id"]:
+                    val = item.get_attribute(attr)
+                    if val and len(val) > 3: return val
+            except: pass
+        except: pass
+        return None
+
+    def _detect_sop_category(self, detail, audit_result):
+        """Deteksi kategori SOP dari detail kesalahan dan hasil audit AI."""
+        text = (detail + " " + audit_result).lower()
+        # Urutan penting: cek yang paling spesifik dulu
+        if any(k in text for k in [
+            "hashtag", "macro bocor", "#dpo",
+            "tidak bantu daftarkan", "tidak memproses data pendaftaran", "pendaftaran",
+            "sop reset password", "lupa password", "reset password",
+            "gagal login", "gagal koneksi"
+        ]):
+            return "Hashtag & Pendaftaran"
+        if any(k in text for k in [
+            "deposit", "withdraw", "wd ", " wd", "depo ",
+            "dana", "mutasi", "transfer", "rekening",
+            "pending", "diproses", "keliru"
+        ]):
+            return "Respon Deposit & Withdraw"
+        if any(k in text for k in [
+            "bonus", "cashback", "rebate", "freechip", "promo",
+            "hashtag double", "klaim bonus"
+        ]):
+            return "Bonus"
+        if any(k in text for k in [
+            "bot tidak nyambung", "bot nyambung", "[bot]",
+            "username tidak valid", "id tidak valid",
+            "handover", "takeover", "tidak merespon setelah"
+        ]):
+            return "Kinerja Bot & Handover"
+        if any(k in text for k in [
+            "qris", "gangguan bank", "bank offline",
+            "no rekening", "syarat reset", "dana limit"
+        ]):
+            return "Teknis & Gangguan"
+        if any(k in text for k in [
+            "tidak sopan", "capslock", "caps lock", "kasar", "sarkas",
+            "slow response", "lambat", "5 menit",
+            "salah jawab", "jawaban tidak sesuai", "salah berikan",
+            "tidak menyelesaikan", "menggantung", "tidak selesai",
+            "no wa", "nomor wa", "whatsapp",
+            "rtp", "link alternatif", "bocoran"
+        ]):
+            return "Etika & Standar Pelayanan"
+        return "Umum"
 
     def perform_download(self, chat_id):
         try:
@@ -1236,7 +1768,7 @@ class BrowserAuditApp:
             menu_btn = None
             for sel in menu_selectors:
                 try:
-                    menu_btn = WebDriverWait(self.driver, 3).until(
+                    menu_btn = WebDriverWait(self.driver, 1.5).until(
                         EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
                     if menu_btn: break
                 except: continue
@@ -1250,7 +1782,7 @@ class BrowserAuditApp:
                     self.log(f"⚠️ Menu tidak ditemukan: {chat_id}")
                     return False
 
-            menu_btn.click(); time.sleep(1.5)
+            menu_btn.click(); time.sleep(0.7)
 
             # Auto-detect tombol Download (coba banyak variasi teks & selector)
             dl_btn = None
@@ -1305,9 +1837,38 @@ class BrowserAuditApp:
                 return False
 
             dl_btn.click()
-            self.processed_history.add(chat_id)
             self.log(f"⬇️ Download: {chat_id}")
-            time.sleep(1.5)
+            time.sleep(0.5)
+
+            # Rename file: LiveChat_transcript_xxx.txt → xxx.txt
+            old_file = os.path.join(self.local_in, f"LiveChat_transcript_{chat_id}.txt")
+            new_file = os.path.join(self.local_in, f"{chat_id}.txt")
+            for _ in range(10):
+                if os.path.exists(old_file):
+                    try:
+                        os.rename(old_file, new_file)
+                        break
+                    except PermissionError:
+                        time.sleep(0.5)
+                        continue
+                    except: break
+                time.sleep(0.5)
+
+            # Pindahkan ke subfolder tanggal: Data_Chat_Masuk/{YYYY-MM-DD}/
+            try:
+                if os.path.exists(new_file):
+                    with open(new_file, "r", encoding="utf-8", errors="ignore") as f:
+                        preview = f.read(500)
+                    chat_date = self.extract_chat_date(preview)
+                    date_folder = os.path.join(self.local_in, chat_date)
+                    if not os.path.exists(date_folder):
+                        os.makedirs(date_folder)
+                    final_path = os.path.join(date_folder, f"{chat_id}.txt")
+                    if not os.path.exists(final_path):
+                        shutil.move(new_file, final_path)
+            except: pass  # Jika gagal, file tetap di root
+
+            self.processed_history.add(chat_id)
             return True
         except TimeoutException:
             self.log(f"⚠️ Timeout menu: {chat_id}")
@@ -1315,6 +1876,56 @@ class BrowserAuditApp:
         except Exception as e:
             self.log(f"⚠️ Gagal download {chat_id}: {str(e)[:60]}")
             return False
+
+    def organize_batch_folders(self):
+        """Rapikan file di Data_Chat_Selesai per batch 250 file per tanggal."""
+        try:
+            # Batch per web_name/date folder di Data_Chat_Selesai
+            BATCH_SIZE = 250
+            total_moved = 0
+
+            for web_name in os.listdir(self.local_out):
+                web_path = os.path.join(self.local_out, web_name)
+                if not os.path.isdir(web_path):
+                    continue
+
+                for date_folder in os.listdir(web_path):
+                    date_path = os.path.join(web_path, date_folder)
+                    if not os.path.isdir(date_path):
+                        continue
+
+                    # Hitung file .txt langsung di folder ini (bukan di subfolder)
+                    files = sorted([f for f in os.listdir(date_path)
+                                    if f.endswith(".txt") and os.path.isfile(os.path.join(date_path, f))])
+                    if len(files) <= BATCH_SIZE:
+                        continue
+
+                    total_files = len(files)
+                    total_batches = (total_files + BATCH_SIZE - 1) // BATCH_SIZE
+
+                    for batch_num in range(total_batches):
+                        start = batch_num * BATCH_SIZE
+                        end = min(start + BATCH_SIZE, total_files)
+                        batch_files = files[start:end]
+
+                        # Nama folder stabil: Batch_1, Batch_2, dst (tanpa range angka)
+                        batch_folder = os.path.join(date_path, f"Batch_{batch_num + 1}")
+                        if not os.path.exists(batch_folder):
+                            os.makedirs(batch_folder)
+
+                        for f in batch_files:
+                            src = os.path.join(date_path, f)
+                            dst = os.path.join(batch_folder, f)
+                            if os.path.exists(src) and not os.path.exists(dst):
+                                try:
+                                    shutil.move(src, dst)
+                                    total_moved += 1
+                                except: pass
+
+            if total_moved > 0:
+                self.log(f"📂 Batch: {total_moved} file dirapikan di Data_Chat_Selesai")
+        except Exception as e:
+            self.log(f"⚠️ Batch folder error: {str(e)[:60]}")
 
     # --- MONITORING LOOP (VISION + STRICT FILTER) ---
 
@@ -1345,10 +1956,16 @@ class BrowserAuditApp:
 
         while self.is_monitoring:
             try:
-                files = sorted([f for f in os.listdir(self.local_in) if f.endswith(".txt")])
+                # Scan file .txt di root + subfolder tanggal Data_Chat_Masuk/
+                file_list = []  # list of (filename, full_path)
+                for root_dir, dirs, dir_files in os.walk(self.local_in):
+                    for f in dir_files:
+                        if f.endswith(".txt"):
+                            file_list.append((f, os.path.join(root_dir, f)))
+                file_list.sort(key=lambda x: x[0])
 
                 # Jika tidak ada file, tunggu lalu cek lagi (hemat CPU)
-                if not files:
+                if not file_list:
                     time.sleep(3)
                     consecutive_errors = 0
                     continue
@@ -1359,9 +1976,30 @@ class BrowserAuditApp:
                     self.current_key_index = 0
                     self.log("🔄 Reset rotasi key.")
 
-                for filename in files:
+                for filename, file_path in file_list:
                     if not self.is_monitoring: break
-                    file_path = os.path.join(self.local_in, filename)
+
+                    # Rename jika masih format lama (LiveChat_transcript_xxx.txt → xxx.txt)
+                    if filename.startswith("LiveChat_transcript_"):
+                        new_name = filename.replace("LiveChat_transcript_", "")
+                        new_path = os.path.join(os.path.dirname(file_path), new_name)
+                        if not os.path.exists(new_path):
+                            try:
+                                os.rename(file_path, new_path)
+                                filename = new_name
+                                file_path = new_path
+                            except: pass
+                        else:
+                            try: os.remove(file_path)
+                            except: pass
+                            continue
+
+                    # Anti-duplikat: extract chat_id bersih dari filename
+                    chat_id_from_file = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
+                    if chat_id_from_file in self.audited_history:
+                        try: os.remove(file_path)
+                        except: pass
+                        continue
 
                     # Pastikan file sudah selesai ditulis (cek ukuran stabil)
                     try:
@@ -1393,20 +2031,40 @@ class BrowserAuditApp:
                     chat_cost_idr = 0.0
 
                     if mode_audit != "TIDAK PAKAI AI":
-                        img_url = images[0] if images else None
-                        audit_result, t_in, t_out = self.audit_content(
-                            api_key_string, self.text_sop.get("1.0", tk.END), content,
-                            userid, chat_time, chat_date, mode_audit, links, img_url
+                        # --- TAHAP 1: SCREENING CEPAT ---
+                        screening_verdict, s_in, s_out = self.screening_content(
+                            api_key_string, content, userid, chat_time, chat_date, mode_audit
                         )
 
-                        # Jika quota habis / stopped, JANGAN proses file ini — retry nanti
-                        if audit_result in ("QUOTA_EXHAUSTED", "STOPPED"):
+                        if screening_verdict == "STOPPED":
                             self.log(f"🔁 {filename} akan di-retry di loop berikutnya.")
                             continue
 
-                        chat_cost_idr = ((t_in / 1000000 * self.price_input_1m) + (t_out / 1000000 * self.price_output_1m)) * self.usd_to_idr
+                        screening_cost = ((s_in / 1000000 * self.price_input_1m) + (s_out / 1000000 * self.price_output_1m)) * self.usd_to_idr
+                        chat_cost_idr += screening_cost
+
+                        if screening_verdict == "LULUS":
+                            # Screening LULUS — skip full audit, hemat cost
+                            audit_result = f"{userid}\nTopik: Normal/Lancar\nLULUS"
+                            self.log(f"✅ Screening LULUS — skip audit detail | 💰 Rp {screening_cost:.4f}")
+                        else:
+                            # --- TAHAP 2: AUDIT DETAIL (hanya yang PERIKSA) ---
+                            self.log(f"🔎 Screening PERIKSA — lanjut audit detail...")
+                            img_url = images[0] if images else None
+                            audit_result, t_in, t_out = self.audit_content(
+                                api_key_string, self.text_sop.get("1.0", tk.END), content,
+                                userid, chat_time, chat_date, mode_audit, links, img_url
+                            )
+
+                            # Jika quota habis / stopped, JANGAN proses file ini — retry nanti
+                            if audit_result in ("QUOTA_EXHAUSTED", "STOPPED"):
+                                self.log(f"🔁 {filename} akan di-retry di loop berikutnya.")
+                                continue
+
+                            audit_cost = ((t_in / 1000000 * self.price_input_1m) + (t_out / 1000000 * self.price_output_1m)) * self.usd_to_idr
+                            chat_cost_idr += audit_cost
                     else:
-                        audit_result = f"{userid}\nLULUS\nSaran AI: Pelayanan Sudah Bagus"
+                        audit_result = f"{userid}\nTopik: Normal/Lancar\nLULUS"
 
                     # --- FILTER GSHEET ---
                     audit_res_up = audit_result.upper()
@@ -1418,34 +2076,122 @@ class BrowserAuditApp:
                         status_label = "TIDAK LULUS" if is_failed else "PERLU PERBAIKAN"
                         m = re.search(r"(?:TIDAK LULUS|SOP 2|PERLU PERBAIKAN)\s*[\(\[]\s*(.*?)\s*[\)\]]", audit_result, re.IGNORECASE | re.DOTALL)
                         detail = m.group(1).strip() if m else "Deteksi Temuan"
-                        row = [chat_date, chat_time, userid, status_label, "Umum", detail, filename]
+                        # Bersihkan prefix Tugas/Kategori dari detail
+                        detail = re.sub(r"^Tugas\s*\d+\s*[-–:]\s*", "", detail, flags=re.IGNORECASE).strip()
+                        detail = re.sub(r"^(?:Hashtag & Pendaftaran|Respon Deposit & Withdraw|Bonus|Etika & Standar Pelayanan|Teknis & Gangguan|Kinerja Bot & (?:Kelalaian )?Handover|Kategori)\s*[-–:]\s*", "", detail, flags=re.IGNORECASE).strip()
+
+                        # --- SPESIFIKKAN DETAIL YANG CAMPUR (Deposit/Withdraw → pilih salah satu) ---
+                        content_lower = content.lower()
+                        if "deposit/withdraw" in detail.lower() or "deposit/wd" in detail.lower() or "depo/wd" in detail.lower():
+                            # Cek dari transcript apakah masalahnya deposit atau withdraw
+                            has_wd = any(k in content_lower for k in ["withdraw", " wd ", "tarik dana", "penarikan", "cairkan"])
+                            has_depo = any(k in content_lower for k in ["deposit", " depo ", "setor", "transfer masuk", "top up"])
+                            if has_wd and not has_depo:
+                                detail = detail.replace("Deposit/Withdraw", "Withdraw").replace("deposit/withdraw", "withdraw")
+                                detail = detail.replace("Deposit/WD", "WD").replace("deposit/wd", "wd")
+                                detail = detail.replace("Depo/WD", "WD").replace("depo/wd", "wd")
+                            elif has_depo and not has_wd:
+                                detail = detail.replace("Deposit/Withdraw", "Deposit").replace("deposit/withdraw", "deposit")
+                                detail = detail.replace("Deposit/WD", "Deposit").replace("deposit/wd", "deposit")
+                                detail = detail.replace("Depo/WD", "Deposit").replace("depo/wd", "deposit")
+                            # Kalau dua-duanya ada, biarkan yang paling dominan
+                            elif has_wd and has_depo:
+                                wd_count = sum(content_lower.count(k) for k in ["withdraw", " wd ", "tarik dana"])
+                                depo_count = sum(content_lower.count(k) for k in ["deposit", " depo ", "setor"])
+                                if wd_count > depo_count:
+                                    detail = detail.replace("Deposit/Withdraw", "Withdraw").replace("deposit/withdraw", "withdraw")
+                                    detail = detail.replace("Deposit/WD", "WD").replace("deposit/wd", "wd")
+                                else:
+                                    detail = detail.replace("Deposit/Withdraw", "Deposit").replace("deposit/withdraw", "deposit")
+                                    detail = detail.replace("Deposit/WD", "Deposit").replace("deposit/wd", "deposit")
+
+                        # --- DETEKSI KATEGORI SOP DARI DETAIL ---
+                        kategori = self._detect_sop_category(detail, audit_result)
+
+                        file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
+                        row = [chat_date, chat_time, userid, status_label, kategori, detail, file_id]
                         self.send_to_google_sheet(row, web_name)
                         self.increment_stats(is_noteworthy=True, web_name=web_name, cost=chat_cost_idr)
-                        if "SARAN AI:" in audit_res_up:
+                        if self.saran_ai_enabled and "SARAN AI:" in audit_res_up:
                             saran_match = re.search(r"Saran AI:\s*(.*)", audit_result, re.IGNORECASE)
                             if saran_match: self.log_insight(userid, filename, saran_match.group(1).strip())
                     else:
                         self.increment_stats(is_noteworthy=False, web_name=web_name, cost=chat_cost_idr)
 
                     self.log(f"💰 Rp {chat_cost_idr:.4f} | Total [{web_name}]: Rp {self.today_stats['details'][web_name]['cost']:,.2f}")
-                    self.send_telegram_text(audit_result)
 
-                    if images:
-                        try: requests.post(f"https://api.telegram.org/bot{self.entry_tele_token.get()}/sendPhoto", data={"chat_id": self.entry_tele_chatid.get(), "photo": images[0], "caption": f"📸 Gambar dari {userid}"})
-                        except: pass
-                    if is_failed:
+                    # --- TELEGRAM: Hanya kirim yang bermasalah ---
+                    if is_failed or is_sop2 or is_perlu_perbaikan:
+                        tele_msg = audit_result
+                        if not self.saran_ai_enabled:
+                            tele_msg = re.sub(r"(?i)\n?Saran AI:.*", "", tele_msg).strip()
+                        self.send_telegram_text(tele_msg)
+
+                        if images:
+                            try: requests.post(f"https://api.telegram.org/bot{self.entry_tele_token.get()}/sendPhoto", data={"chat_id": self.entry_tele_chatid.get(), "photo": images[0], "caption": f"📸 Gambar dari {userid}"})
+                            except: pass
+                        if is_failed:
+                            try:
+                                with open(file_path, 'rb') as f:
+                                    requests.post(f"https://api.telegram.org/bot{self.entry_tele_token.get()}/sendDocument", files={'document': f}, data={'chat_id': self.entry_tele_chatid.get(), 'caption': "📜 Transkrip Pelanggaran"})
+                            except: pass
+
+                    # --- CEK GAGAL LOGIN / LOADING LAMA (sesuai SOP Tugas 2) ---
+                    gagal_keywords = ["gagal login", "gagal koneksi", "gagal login/koneksi",
+                                      "tidak bisa login", "tidak bisa masuk", "login gagal",
+                                      "loading lama", "loading terlalu lama", "tidak bisa loading",
+                                      "error login", "koneksi error", "connection error",
+                                      "failed to login", "can't login", "cannot login"]
+                    audit_lower = audit_result.lower()
+                    is_gagal_login = any(kw in audit_lower for kw in gagal_keywords)
+
+                    # --- CEK LUPA PASSWORD ---
+                    lupa_pw_keywords = ["lupa password", "lupa pass", "lupa kata sandi",
+                                        "reset password", "reset pass", "ganti password",
+                                        "forgot password", "change password", "ubah password",
+                                        "tidak bisa login password", "password salah", "wrong password"]
+                    content_lower = content.lower()
+                    is_lupa_password = any(kw in content_lower for kw in lupa_pw_keywords)
+
+                    date_folder = chat_date if chat_date else datetime.now().strftime("%Y-%m-%d")
+                    if is_gagal_login:
+                        # Pindah ke folder GAGAL LOGIN
+                        gagal_folder = os.path.join(self.local_out, "GAGAL LOGIN", date_folder)
+                        if not os.path.exists(gagal_folder): os.makedirs(gagal_folder)
                         try:
-                            with open(file_path, 'rb') as f:
-                                requests.post(f"https://api.telegram.org/bot{self.entry_tele_token.get()}/sendDocument", files={'document': f}, data={'chat_id': self.entry_tele_chatid.get(), 'caption': "📜 Transkrip Pelanggaran"})
-                        except: pass
+                            shutil.move(file_path, os.path.join(gagal_folder, filename))
+                            self.log(f"🚫 GAGAL LOGIN/LOADING: {userid} → folder GAGAL LOGIN")
+                        except:
+                            try: os.remove(file_path)
+                            except: pass
+                    elif is_lupa_password:
+                        # Catat ke sheet tab "LUPA PASSWORD"
+                        file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
+                        lupa_row = [chat_date, chat_time, userid, "LUPA PASSWORD", web_name, "", file_id]
+                        self.send_to_google_sheet(lupa_row, "LUPA PASSWORD")
+                        self.log(f"🔑 LUPA PASSWORD: {userid} → sheet LUPA PASSWORD")
+                        # Pindah ke folder web_name/tanggal seperti biasa
+                        t_folder = os.path.join(self.local_out, web_name, date_folder)
+                        if not os.path.exists(t_folder): os.makedirs(t_folder)
+                        try: shutil.move(file_path, os.path.join(t_folder, filename))
+                        except:
+                            try: os.remove(file_path)
+                            except: pass
+                    else:
+                        t_folder = os.path.join(self.local_out, web_name, date_folder)
+                        if not os.path.exists(t_folder): os.makedirs(t_folder)
+                        try: shutil.move(file_path, os.path.join(t_folder, filename))
+                        except:
+                            try: os.remove(file_path)
+                            except: pass
 
-                    today_folder = datetime.now().strftime("%Y-%m-%d")
-                    t_folder = os.path.join(self.local_out, web_name, today_folder)
-                    if not os.path.exists(t_folder): os.makedirs(t_folder)
-                    try: shutil.move(file_path, os.path.join(t_folder, filename))
-                    except:
-                        try: os.remove(file_path)
-                        except: pass
+                    # Catat ke audited history (anti-duplikat)
+                    self.audited_history.add(chat_id_from_file)
+                    if len(self.audited_history) % 10 == 0:
+                        self.save_audited_history()
+                    # Rapikan batch di Data_Chat_Selesai setiap 250 file
+                    if len(self.audited_history) % 250 == 0:
+                        self.organize_batch_folders()
 
                     consecutive_errors = 0
 
@@ -1464,6 +2210,116 @@ class BrowserAuditApp:
                     self.load_stats()
                 else:
                     time.sleep(5)
+
+        # Simpan audited history saat monitoring berhenti
+        self.save_audited_history()
+
+    def screening_content(self, api_key_string, content, userid, chat_time, chat_date, mode_audit):
+        """Tahap 1: Screening cepat — hanya jawab LULUS atau PERIKSA. Hemat ~70% cost."""
+        raw_keys = api_key_string.split(',')
+        api_keys = []
+        seen_keys = set()
+        for k in raw_keys:
+            clean_k = k.strip().replace("'", "").replace('"', "")
+            if clean_k and clean_k not in seen_keys:
+                api_keys.append(clean_k); seen_keys.add(clean_k)
+        if not api_keys: return "PERIKSA", 0, 0
+
+        model_map = {
+            "GEMINI 2.0 FLASH LITE (GRATIS)":     ["gemini-2.0-flash-lite"],
+            "GEMINI 1.5 FLASH-8B (TERMURAH)":      ["gemini-2.0-flash-lite"],
+            "GEMINI 1.5 FLASH (MURAH & STABIL)":   ["gemini-2.0-flash"],
+            "GEMINI 2.0 FLASH (STANDAR)":           ["gemini-2.0-flash"],
+            "GEMINI 2.5 FLASH (PREMIUM)":           ["gemini-2.5-flash"],
+            "GEMINI 3 FLASH PREVIEW":               ["gemini-3-flash-preview"],
+        }
+        models_to_try = model_map.get(mode_audit, ["gemini-2.5-flash"])
+
+        compressed = self.compress_transcript(content)
+
+        system_screening = """Anda screener QA livechat. Tugas: tentukan apakah chat ini perlu audit detail atau tidak.
+Jawab HANYA satu kata: LULUS atau PERIKSA.
+
+LULUS jika:
+- Member ghosting/spam/test chat (tidak ada pesan manual dari member)
+- Percakapan lancar tanpa masalah, CS/Bot menjawab dengan benar
+- Chat hanya ditangani Bot dan tidak ada indikasi masalah
+
+PERIKSA jika:
+- Ada indikasi pelanggaran (CS lambat, tidak sopan, masalah tidak selesai, info salah)
+- Member komplain/marah dan belum terselesaikan
+- Ada handover tapi CS tidak merespon
+- Bot menjawab tidak nyambung
+- Ada masalah deposit/withdraw/bonus yang menggantung
+
+Jawab HANYA: LULUS atau PERIKSA"""
+
+        prompt = f"""{userid} | {chat_date} {chat_time}
+---
+{compressed}"""
+
+        self.current_key_index = self.current_key_index % len(api_keys)
+
+        for model_name in models_to_try:
+            for key_attempt in range(len(api_keys)):
+                if not self.is_monitoring and not self.is_auto_today: return "STOPPED", 0, 0
+                active_key = api_keys[self.current_key_index % len(api_keys)]
+                key_display = f"...{active_key[-4:]}" if len(active_key) > 4 else "???"
+
+                cooldown_until = self.key_cooldowns.get(key_display, 0)
+                if time.time() < cooldown_until:
+                    self.current_key_index += 1
+                    continue
+
+                try:
+                    genai.configure(api_key=active_key)
+                    self.log(f"🔍 Screening {model_name} | Key: {key_display}")
+                    model = genai.GenerativeModel(model_name, system_instruction=system_screening)
+                    response = model.generate_content(
+                        [prompt],
+                        safety_settings={
+                            'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+                            'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+                            'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+                            'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+                        },
+                        generation_config=genai.types.GenerationConfig(max_output_tokens=10, temperature=0)
+                    )
+
+                    self.key_cooldowns.pop(key_display, None)
+                    pricing = self.model_pricing.get(model_name, {"input": 0.075, "output": 0.30})
+                    self.price_input_1m = pricing["input"]
+                    self.price_output_1m = pricing["output"]
+
+                    t_in = response.usage_metadata.prompt_token_count
+                    t_out = getattr(response.usage_metadata, 'candidates_token_count', 0) or 0
+
+                    try:
+                        result = response.text.strip().upper()
+                    except (ValueError, AttributeError):
+                        result = "PERIKSA"
+
+                    verdict = "LULUS" if "LULUS" in result else "PERIKSA"
+                    self.log(f"🔍 Screening: {verdict} | Token: {t_in}+{t_out}")
+                    return verdict, t_in, t_out
+
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str or "Resource has been exhausted" in error_str:
+                        self.key_cooldowns[key_display] = time.time() + 60
+                        self.current_key_index += 1
+                        continue
+                    elif "400" in error_str and "API_KEY_INVALID" in error_str:
+                        self.key_cooldowns[key_display] = time.time() + 3600
+                        self.current_key_index += 1
+                        continue
+                    else:
+                        self.log(f"⚠️ Screening error: {error_str[:60]}")
+                        return "PERIKSA", 0, 0
+
+        # Jika semua gagal, default PERIKSA (aman, akan di-audit detail)
+        self.log("⚠️ Screening gagal, default PERIKSA")
+        return "PERIKSA", 0, 0
 
     def audit_content(self, api_key_string, sop, content, userid, chat_time, chat_date, mode_audit, links=None, image_url=None):
         # --- PARSE & CLEAN MULTIPLE KEYS ---
@@ -1499,12 +2355,18 @@ class BrowserAuditApp:
         # --- SYSTEM INSTRUCTION (Di-cache oleh Gemini, tidak dihitung ulang tiap request) ---
         system_sop = f"""Anda Auditor QA. Audit berdasarkan SOP berikut:
 {sop}
-FORMAT OUTPUT WAJIB:
+
+ATURAN PENTING TAMBAHAN:
+- Bot bertanya "ada yang bisa dibantu kembali" atau closing setelah proses deposit/WD/masalah selesai = LULUS, ini BUKAN "Jawaban Bot Tidak Nyambung".
+- "Jawaban Bot Tidak Nyambung" HANYA jika Bot menjawab topik yang SAMA SEKALI BERBEDA dari pertanyaan member (contoh: member tanya WD tapi Bot jawab cara daftar).
+- Jika ada baris [SYSTEM] yang menunjukkan handover/transfer ke CS tapi CS tidak merespon, vonis = "CS Tidak Merespon Setelah Handover", BUKAN "Jawaban Bot Tidak Nyambung".
+
+JAWAB SINGKAT & PADAT. Tidak perlu penjelasan tambahan.
+
+FORMAT OUTPUT WAJIB (TIDAK BOLEH DITAMBAH):
 [USERID]
 Topik: [Kategori]
-[STATUS: LULUS / TIDAK LULUS (Poin) / SOP 2 (Poin)]
-Link Diberikan: [Link yang CS berikan ke member, atau - jika tidak ada]
-Saran AI: [Pelayanan Sudah Bagus / Perlu Perbaikan] : [Inti singkat]"""
+[STATUS: LULUS / TIDAK LULUS (Poin) / SOP 2 (Poin)]"""
 
         # --- PROMPT RINGKAS (Hanya data variabel, SOP sudah di system instruction) ---
         prompt = f"""{userid} | {chat_date} {chat_time}
@@ -1560,7 +2422,8 @@ Link: {link_str}
                                 'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
                                 'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
                                 'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
-                            }
+                            },
+                            generation_config=genai.types.GenerationConfig(max_output_tokens=300, temperature=0)
                         )
 
                         # SUKSES - reset cooldown & update harga
@@ -1584,10 +2447,10 @@ Link: {link_str}
                             else:
                                 block_reason = getattr(response, 'prompt_feedback', None)
                                 self.log(f"⚠️ Response diblokir: {block_reason}")
-                                result_text = f"{userid}\nLULUS\nSaran AI: Response diblokir safety filter, dianggap LULUS."
+                                result_text = f"{userid}\nTopik: Normal/Lancar\nLULUS"
 
                         if not result_text:
-                            result_text = f"{userid}\nLULUS\nSaran AI: Response kosong, dianggap LULUS."
+                            result_text = f"{userid}\nTopik: Normal/Lancar\nLULUS"
 
                         return result_text, t_in, t_out
 
@@ -1607,6 +2470,12 @@ Link: {link_str}
                             self.key_cooldowns[key_display] = time.time() + 60
                             self.current_key_index += 1
                             keys_exhausted += 1
+                            continue
+
+                        elif "Unable to process input image" in error_str or "image" in error_str.lower() and "400" in error_str:
+                            self.log(f"⚠️ Gambar error, retry tanpa gambar...")
+                            image_data = None
+                            parts = [prompt]
                             continue
 
                         elif "503" in error_str:
@@ -1681,7 +2550,7 @@ Link: {link_str}
         if fn: self.entry_gsheet_json.delete(0, tk.END); self.entry_gsheet_json.insert(0, fn)
 
     def resolve_json_path(self, json_path):
-        """Resolve path JSON: jika relatif, cari relatif ke app_path."""
+        """Resolve path JSON: cek bundled resource, relatif ke app_path, atau absolut."""
         if not json_path: return json_path
         if os.path.isabs(json_path) and os.path.exists(json_path):
             return json_path
@@ -1689,7 +2558,19 @@ Link: {link_str}
         resolved = os.path.join(self.app_path, json_path)
         if os.path.exists(resolved):
             return resolved
-        return json_path  # Return apa adanya, biar error message jelas
+        # Coba dari bundled resource (PyInstaller _MEIPASS)
+        if getattr(sys, 'frozen', False):
+            bundled = os.path.join(sys._MEIPASS, json_path)
+            if os.path.exists(bundled):
+                # Copy ke app_path agar bisa dipakai
+                try:
+                    import shutil
+                    dest = os.path.join(self.app_path, json_path)
+                    shutil.copy2(bundled, dest)
+                    return dest
+                except:
+                    return bundled
+        return json_path
 
     def test_gsheet_connection(self):
         if not GSPREAD_AVAILABLE: return
@@ -1718,15 +2599,36 @@ Link: {link_str}
             except gspread.exceptions.WorksheetNotFound:
                 worksheet = spreadsheet.add_worksheet(title=target_tab_name, rows=1000, cols=10)
                 worksheet.append_row(["Tanggal Chat", "Jam", "UserID", "Status", "Topik", "Detail/Saran", "Filename"])
+            # Cek duplikat: jika file_id (kolom terakhir) sudah ada di sheet, skip
+            file_id = data_row[-1] if data_row else ""
+            if file_id:
+                try:
+                    existing = worksheet.col_values(7)  # kolom Filename
+                    if file_id in existing:
+                        self.log(f"⏭ Sheet skip duplikat: {file_id}")
+                        return
+                except: pass
             worksheet.append_row(data_row)
         except: pass
+
+    def save_config_silent(self):
+        """Simpan config tanpa popup."""
+        c = {
+            "api_key": self.entry_api.get(), "tele_token": self.entry_tele_token.get(), "tele_chatid": self.entry_tele_chatid.get(),
+            "lc_email": self.entry_lc_email.get(), "lc_pass": self.entry_lc_password.get(),
+            "gsheet_name": self.entry_gsheet_name.get(), "gsheet_json": self.entry_gsheet_json.get(),
+            "audit_mode": self.combo_audit_mode.get(), "headless": self.headless_var.get(),
+            "saran_ai_enabled": self.saran_ai_enabled
+        }
+        with open(self.config_file, "w") as f: json.dump(c, f)
 
     def save_config(self):
         c = {
             "api_key": self.entry_api.get(), "tele_token": self.entry_tele_token.get(), "tele_chatid": self.entry_tele_chatid.get(),
             "lc_email": self.entry_lc_email.get(), "lc_pass": self.entry_lc_password.get(),
             "gsheet_name": self.entry_gsheet_name.get(), "gsheet_json": self.entry_gsheet_json.get(),
-            "audit_mode": self.combo_audit_mode.get(), "headless": self.headless_var.get()
+            "audit_mode": self.combo_audit_mode.get(), "headless": self.headless_var.get(),
+            "saran_ai_enabled": self.saran_ai_enabled
         }
         with open(self.config_file, "w") as f: json.dump(c, f)
         messagebox.showinfo("Sukses", "Config tersimpan!"); self.update_stats_ui()
@@ -1753,6 +2655,10 @@ Link: {link_str}
                     valid_modes = [self.combo_audit_mode.cget("values")[i] for i in range(len(self.combo_audit_mode.cget("values")))] if self.combo_audit_mode.cget("values") else []
                     if saved_mode and saved_mode in str(valid_modes):
                         self.combo_audit_mode.set(saved_mode)
+                    # Load saran AI setting
+                    self.saran_ai_enabled = c.get("saran_ai_enabled", True)
+                    if not self.saran_ai_enabled:
+                        self.btn_saran_ai.config(text="💡 SARAN AI: OFF", bg="#9E9E9E")
                 self.update_stats_ui()
             except: pass
         elif DEFAULT_API_KEYS:
@@ -1776,5 +2682,20 @@ Link: {link_str}
         if messagebox.askyesno("Reset", "Hapus history?"):
             self.processed_history = set(); self.save_history(); self.log("History direset.")
 
+    def load_audited_history(self):
+        if os.path.exists(self.audited_history_file):
+            try:
+                with open(self.audited_history_file, "r") as f: self.audited_history = set(json.load(f))
+            except: pass
+
+    def save_audited_history(self):
+        try:
+            with open(self.audited_history_file, "w") as f: json.dump(list(self.audited_history), f)
+        except: pass
+
 if __name__ == "__main__":
-    root = tk.Tk(); app = BrowserAuditApp(root); root.mainloop()
+    root = tk.Tk()
+    app = BrowserAuditApp(root)
+    # Cek update di background setelah UI siap
+    threading.Thread(target=check_for_update_on_start, daemon=True).start()
+    root.mainloop()
