@@ -2237,21 +2237,21 @@ class BrowserAuditApp:
 
         compressed = self.compress_transcript(content)
 
-        system_screening = """Anda screener QA livechat. Tugas: tentukan apakah chat ini perlu audit detail atau tidak.
+        system_screening = """Anda screener QA livechat. Tugas: tentukan apakah chat ini perlu audit detail.
 Jawab HANYA satu kata: LULUS atau PERIKSA.
 
-LULUS jika:
-- Member ghosting/spam/test chat (tidak ada pesan manual dari member)
-- Percakapan lancar tanpa masalah, CS/Bot menjawab dengan benar
-- Chat hanya ditangani Bot dan tidak ada indikasi masalah
+LULUS HANYA jika salah satu kondisi ini terpenuhi:
+- Member GHOSTING: tidak ada pesan manual sama sekali dari member setelah greeting Bot/CS
+- SPAM/TEST CHAT: member hanya kirim karakter acak atau langsung pergi
 
-PERIKSA jika:
-- Ada indikasi pelanggaran (CS lambat, tidak sopan, masalah tidak selesai, info salah)
-- Member komplain/marah dan belum terselesaikan
-- Ada handover tapi CS tidak merespon
-- Bot menjawab tidak nyambung
-- Ada masalah deposit/withdraw/bonus yang menggantung
+SEMUA kondisi lain = PERIKSA, termasuk:
+- Ada percakapan antara member dan CS/Bot (apapun topiknya)
+- Ada keluhan, pertanyaan, atau permintaan dari member
+- Ada topik deposit, withdraw, bonus, password, akun
+- Ada handover atau transfer ke CS
+- Chat ditangani Bot maupun Human
 
+Jika ragu, jawab PERIKSA.
 Jawab HANYA: LULUS atau PERIKSA"""
 
         prompt = f"""{userid} | {chat_date} {chat_time}
