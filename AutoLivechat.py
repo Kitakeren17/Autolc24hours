@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.1"
+APP_VERSION = "16.4.2"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -2341,12 +2341,11 @@ ATURAN PENTING TAMBAHAN:
 - "Jawaban Bot Tidak Nyambung" HANYA jika Bot menjawab topik yang SAMA SEKALI BERBEDA dari pertanyaan member (contoh: member tanya WD tapi Bot jawab cara daftar).
 - Jika ada baris [SYSTEM] yang menunjukkan handover/transfer ke CS tapi CS tidak merespon, vonis = "CS Tidak Merespon Setelah Handover", BUKAN "Jawaban Bot Tidak Nyambung".
 
-JAWAB SINGKAT & PADAT. Tidak perlu penjelasan tambahan.
-
-FORMAT OUTPUT WAJIB (TIDAK BOLEH DITAMBAH):
+FORMAT OUTPUT WAJIB:
 [USERID]
 Topik: [Kategori]
-[STATUS: LULUS / TIDAK LULUS (Poin) / SOP 2 (Poin)]"""
+[STATUS: LULUS / TIDAK LULUS (Poin) / SOP 2 (Poin)]
+Analisa: [1-2 kalimat singkat alasan vonis]"""
 
         # --- PROMPT RINGKAS (Hanya data variabel, SOP sudah di system instruction) ---
         prompt = f"""{userid} | {chat_date} {chat_time}
@@ -2403,7 +2402,7 @@ Link: {link_str}
                                 'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
                                 'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
                             },
-                            generation_config=genai.types.GenerationConfig(max_output_tokens=300, temperature=0)
+                            generation_config=genai.types.GenerationConfig(max_output_tokens=500, temperature=0)
                         )
 
                         # SUKSES - reset cooldown & update harga
