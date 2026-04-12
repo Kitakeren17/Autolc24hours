@@ -2123,7 +2123,8 @@ class BrowserAuditApp:
                                       "error login", "koneksi error", "connection error",
                                       "failed to login", "can't login", "cannot login"]
                     audit_lower = audit_result.lower()
-                    is_gagal_login = any(kw in audit_lower for kw in gagal_keywords)
+                    gagal_matched = [kw for kw in gagal_keywords if kw in audit_lower]
+                    is_gagal_login = len(gagal_matched) > 0
 
                     # --- CEK LUPA PASSWORD ---
                     lupa_pw_keywords = ["lupa password", "lupa pass", "lupa kata sandi",
@@ -2135,12 +2136,17 @@ class BrowserAuditApp:
 
                     date_folder = chat_date if chat_date else datetime.now().strftime("%Y-%m-%d")
                     if is_gagal_login:
+                        # Catat ke sheet tab "GAGAL LOGIN"
+                        file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
+                        gagal_detail = gagal_matched[0].title()
+                        gagal_row = [chat_date, chat_time, userid, "GAGAL LOGIN", web_name, gagal_detail, file_id]
+                        self.send_to_google_sheet(gagal_row, "GAGAL LOGIN")
+                        self.log(f"🚫 GAGAL LOGIN/LOADING: {userid} → sheet GAGAL LOGIN")
                         # Pindah ke folder GAGAL LOGIN
                         gagal_folder = os.path.join(self.local_out, "GAGAL LOGIN", date_folder)
                         if not os.path.exists(gagal_folder): os.makedirs(gagal_folder)
                         try:
                             shutil.move(file_path, os.path.join(gagal_folder, filename))
-                            self.log(f"🚫 GAGAL LOGIN/LOADING: {userid} → folder GAGAL LOGIN")
                         except:
                             try: os.remove(file_path)
                             except: pass
