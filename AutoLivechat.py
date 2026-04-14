@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.2"
+APP_VERSION = "16.4.4"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
