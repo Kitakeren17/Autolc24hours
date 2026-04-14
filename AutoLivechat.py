@@ -299,11 +299,14 @@ class BrowserAuditApp:
         deleted = 0
         try:
             for root, dirs, files in os.walk(self.local_out):
+                # JANGAN hapus file di folder _duplikat_skip (buat investigasi)
+                if "_duplikat_skip" in root:
+                    continue
                 for f in files:
                     fp = os.path.join(root, f)
                     if os.path.getmtime(fp) < cutoff:
                         os.remove(fp); deleted += 1
-            if deleted > 0: self.log(f"🧹 Auto Cleanup: {deleted} file lama dihapus.")
+            if deleted > 0: self.log(f"🧹 Auto Cleanup: {deleted} file lama dihapus (>2 hari).")
         except: pass
 
     def manual_cleanup(self):
@@ -647,11 +650,24 @@ class BrowserAuditApp:
         try:
             wait = WebDriverWait(self.driver, 15)
             email_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='email']")))
-            email_field.send_keys(email); self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+            email_field.clear()
+            email_field.send_keys(email)
+            self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+            time.sleep(2)
             pass_field = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']")))
-            pass_field.send_keys(password); self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
-            time.sleep(5); self.driver.get("https://my.livechatinc.com/archives")
-        except: self.log("⚠️ Login manual dibutuhkan.")
+            pass_field.clear()
+            pass_field.send_keys(password)
+            self.driver.find_element(By.CSS_SELECTOR, "button[type='submit']").click()
+            self.log("🔐 Login submit, tunggu redirect...")
+            time.sleep(8)
+            self.driver.get("https://my.livechatinc.com/archives")
+            time.sleep(3)
+            if self.is_logged_in():
+                self.log("✅ Auto-login berhasil!")
+            else:
+                self.log("⚠️ Auto-login selesai tapi belum terdeteksi login. Mungkin perlu login manual.")
+        except Exception as e:
+            self.log(f"⚠️ Login gagal: {str(e)[:60]}. Login manual dibutuhkan.")
 
     def toggle_auto_clicker(self):
         if self.is_auto_clicking: self.is_auto_clicking = False; self.btn_auto_click.config(text="▶ START LOOP", bg="#673AB7")
@@ -732,6 +748,11 @@ class BrowserAuditApp:
         self.log("🔴 AUTO DOWNLOADER AKTIF.")
         while self.is_auto_clicking:
             try:
+                # Cek login sebelum setiap scan cycle
+                if not self.ensure_logged_in():
+                    self.log("❌ Belum login. Tunggu 60 detik lalu retry...")
+                    time.sleep(60)
+                    continue
                 self.driver.get("https://my.livechatinc.com/archives"); time.sleep(5)
                 self.cleanup_old_files(days=2)
 
@@ -1082,6 +1103,12 @@ class BrowserAuditApp:
             target_date = datetime.now() if mode == "Today" else datetime.now() - timedelta(days=1)
             date_display = target_date.strftime("%Y-%m-%d")
 
+            # --- CEK LOGIN ---
+            if not self.ensure_logged_in():
+                self.log(f"❌ Belum login. Tidak bisa download {date_display}.")
+                self.is_date_mode = False
+                return
+
             # --- NAVIGASI KE ARCHIVES ---
             self.driver.get("https://my.livechatinc.com/archives")
             time.sleep(5)
@@ -1231,6 +1258,7 @@ class BrowserAuditApp:
         """Loop: download semua chat hari ini, cek chat baru tiap 5 menit, lanjut ke hari berikutnya."""
         self.log("🔄 AUTO TODAY 24H AKTIF — download, cek chat baru, & lanjut ke hari berikutnya.")
         RECHECK_INTERVAL = 300  # 5 menit
+        self._last_health_check = time.time()
 
         while self.is_auto_today:
             current_date = datetime.now().strftime("%Y-%m-%d")
@@ -1238,6 +1266,20 @@ class BrowserAuditApp:
 
             # --- Loop: download + cek chat baru selama masih hari yang sama ---
             while self.is_auto_today:
+                # Health-check: cek login setiap 30 menit
+                now = time.time()
+                if now - self._last_health_check >= 1800:
+                    self._last_health_check = now
+                    self.log("🩺 Health-check: cek status login...")
+                    if not self.is_logged_in():
+                        self.log("⚠️ Health-check: session expired! Re-login...")
+                        if not self.ensure_logged_in():
+                            self.log("❌ Health-check: gagal re-login. Tunggu 60 detik...")
+                            time.sleep(60)
+                            continue
+                    else:
+                        self.log("✅ Health-check: login OK.")
+
                 try:
                     downloaded = self._download_one_day("Today")
                 except Exception as e:
@@ -1256,15 +1298,13 @@ class BrowserAuditApp:
                                 self.driver = None
                             time.sleep(3)
                             self.open_chrome()
-                            time.sleep(5)
-                            # Tunggu login selesai
-                            for _ in range(12):
-                                try:
-                                    if "archives" in self.driver.current_url or "my.livechatinc" in self.driver.current_url:
-                                        break
-                                except: pass
-                                time.sleep(5)
-                            self.log("✅ Chrome baru siap. Lanjut download...")
+                            time.sleep(8)
+                            # Validasi login yang benar (bukan cuma cek URL)
+                            if self.ensure_logged_in():
+                                self.log("✅ Chrome baru siap & login berhasil. Lanjut download...")
+                            else:
+                                self.log("❌ Chrome baru dibuka tapi gagal login. Tunggu 60 detik...")
+                                time.sleep(60)
                             continue  # retry download
                         except Exception as re_err:
                             self.log(f"❌ Gagal restart Chrome: {str(re_err)[:60]}")
@@ -1330,7 +1370,7 @@ class BrowserAuditApp:
                         nums = re.findall(r'[\d,]+', txt)
                         for n in nums:
                             num = int(n.replace(',', ''))
-                            if num > 50:  # kemungkinan total chat
+                            if num > 0:  # terima semua angka valid (termasuk hari sepi < 50)
                                 return num
                 except: continue
         except: pass
@@ -1387,6 +1427,11 @@ class BrowserAuditApp:
                     self.log(f"🌅 Hari berganti saat download. Stop {date_display}.")
                     break
 
+                # --- CEK LOGIN SEBELUM MULAI ---
+                if not self.ensure_logged_in():
+                    self.log(f"❌ Tidak bisa lanjut download {date_display}: belum login.")
+                    return downloaded
+
                 # --- BUKA ARCHIVES + FILTER ---
                 self.driver.get("https://my.livechatinc.com/archives")
                 time.sleep(5)
@@ -1397,7 +1442,17 @@ class BrowserAuditApp:
                     self.log(f"✅ Filter {mode} aktif.")
                     time.sleep(3)
                 else:
-                    self.log(f"⚠️ Filter UI gagal. Chat mungkin campur tanggal.")
+                    # Retry filter 1x sebelum lanjut
+                    self.log(f"⚠️ Filter UI gagal. Retry 1x...")
+                    time.sleep(3)
+                    self.driver.get("https://my.livechatinc.com/archives")
+                    time.sleep(5)
+                    filter_ok = self.apply_livechat_filter(mode)
+                    if filter_ok:
+                        self.log(f"✅ Filter {mode} berhasil setelah retry.")
+                        time.sleep(3)
+                    else:
+                        self.log(f"⚠️ Filter tetap gagal. Chat mungkin campur tanggal — hati-hati.")
 
                 # --- CEK PROGRESS ---
                 archives_total = self._get_archives_total()
@@ -1563,6 +1618,80 @@ class BrowserAuditApp:
             self.log(f"❌ Error download hari {mode}: {e}")
             return 0
 
+    def is_logged_in(self):
+        """Cek apakah user benar-benar sudah login di LiveChat (bukan cuma cek URL)."""
+        try:
+            if not self.driver:
+                return False
+            current_url = self.driver.current_url
+            # Halaman login biasanya di accounts.livechatinc.com atau ada form login
+            if "accounts.livechatinc.com" in current_url:
+                return False
+            # Cek apakah ada elemen yang hanya muncul setelah login
+            login_indicators = [
+                "input[type='email']",   # form login masih tampil = belum login
+                "input[type='password']", # form password masih tampil = belum login
+            ]
+            for sel in login_indicators:
+                try:
+                    el = self.driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed():
+                        return False  # masih di halaman login
+                except:
+                    continue
+            # Cek apakah ada elemen archives (hanya muncul setelah login)
+            archive_indicators = [
+                "div[class*='archive']",
+                "#archives",
+                "[data-testid='archive-list']",
+                "div[class*='css-1j8yl8o']",
+            ]
+            for sel in archive_indicators:
+                try:
+                    el = self.driver.find_element(By.CSS_SELECTOR, sel)
+                    if el.is_displayed():
+                        return True
+                except:
+                    continue
+            # Fallback: kalau URL archives dan tidak ada form login = kemungkinan login
+            if "/archives" in current_url and "my.livechatinc.com" in current_url:
+                return True
+            return False
+        except Exception:
+            return False
+
+    def ensure_logged_in(self, max_retries=3):
+        """Pastikan sudah login. Kalau belum, coba auto re-login. Return True jika berhasil."""
+        for attempt in range(max_retries):
+            if self.is_logged_in():
+                return True
+            self.log(f"🔐 Belum login (attempt {attempt+1}/{max_retries}). Mencoba auto re-login...")
+            try:
+                self.driver.get("https://my.livechatinc.com/archives")
+                time.sleep(3)
+                # Cek lagi setelah navigasi (mungkin cookie masih valid)
+                if self.is_logged_in():
+                    self.log("✅ Session masih valid setelah refresh.")
+                    return True
+                # Perlu login ulang
+                email = self.entry_lc_email.get()
+                password = self.entry_lc_password.get()
+                if not email or not password:
+                    self.log("❌ Email/password kosong. Tidak bisa auto re-login.")
+                    return False
+                self.perform_auto_login(email, password)
+                # Tunggu login selesai (max 30 detik)
+                for _ in range(15):
+                    time.sleep(2)
+                    if self.is_logged_in():
+                        self.log("✅ Auto re-login berhasil!")
+                        return True
+            except Exception as e:
+                self.log(f"⚠️ Re-login attempt {attempt+1} gagal: {str(e)[:60]}")
+                time.sleep(3)
+        self.log("❌ Gagal login setelah semua percobaan. Butuh login manual.")
+        return False
+
     def _check_driver_alive(self):
         """Cek apakah ChromeDriver masih responsif."""
         try:
@@ -1582,6 +1711,10 @@ class BrowserAuditApp:
                 # Refresh halaman archives
                 self.driver.get("https://my.livechatinc.com/archives")
                 time.sleep(5)
+                # Pastikan masih login setelah recover
+                if not self.is_logged_in():
+                    self.log("⚠️ ChromeDriver pulih tapi session expired. Re-login...")
+                    return self.ensure_logged_in()
                 return True
             else:
                 self.log("❌ ChromeDriver tidak merespon.")
@@ -1843,30 +1976,49 @@ class BrowserAuditApp:
             # Rename file: LiveChat_transcript_xxx.txt → xxx.txt
             old_file = os.path.join(self.local_in, f"LiveChat_transcript_{chat_id}.txt")
             new_file = os.path.join(self.local_in, f"{chat_id}.txt")
-            for _ in range(10):
+            file_found = False
+            for _ in range(15):  # tunggu max 7.5 detik
                 if os.path.exists(old_file):
                     try:
                         os.rename(old_file, new_file)
+                        file_found = True
                         break
                     except PermissionError:
                         time.sleep(0.5)
                         continue
-                    except: break
+                    except:
+                        file_found = os.path.exists(old_file)  # gagal rename tapi file ada
+                        break
+                elif os.path.exists(new_file):
+                    file_found = True
+                    break
                 time.sleep(0.5)
 
+            # Verifikasi: file benar-benar ada di disk sebelum catat ke history
+            if not file_found and not os.path.exists(new_file) and not os.path.exists(old_file):
+                self.log(f"⚠️ File tidak terdownload ke disk: {chat_id}")
+                return False
+
             # Pindahkan ke subfolder tanggal: Data_Chat_Masuk/{YYYY-MM-DD}/
+            actual_file = new_file if os.path.exists(new_file) else old_file
             try:
-                if os.path.exists(new_file):
-                    with open(new_file, "r", encoding="utf-8", errors="ignore") as f:
+                if os.path.exists(actual_file):
+                    with open(actual_file, "r", encoding="utf-8", errors="ignore") as f:
                         preview = f.read(500)
+                    # Cek file tidak kosong
+                    if len(preview.strip()) < 20:
+                        self.log(f"⚠️ File kosong/corrupt: {chat_id}")
+                        try: os.remove(actual_file)
+                        except: pass
+                        return False
                     chat_date = self.extract_chat_date(preview)
                     date_folder = os.path.join(self.local_in, chat_date)
                     if not os.path.exists(date_folder):
                         os.makedirs(date_folder)
                     final_path = os.path.join(date_folder, f"{chat_id}.txt")
                     if not os.path.exists(final_path):
-                        shutil.move(new_file, final_path)
-            except: pass  # Jika gagal, file tetap di root
+                        shutil.move(actual_file, final_path)
+            except: pass  # Jika gagal pindah, file tetap di root (masih bisa diproses)
 
             self.processed_history.add(chat_id)
             return True
@@ -1988,6 +2140,9 @@ class BrowserAuditApp:
                                 os.rename(file_path, new_path)
                                 filename = new_name
                                 file_path = new_path
+                            except (PermissionError, FileNotFoundError):
+                                # File sedang diakses download thread, skip dulu
+                                continue
                             except: pass
                         else:
                             try: os.remove(file_path)
@@ -1997,8 +2152,14 @@ class BrowserAuditApp:
                     # Anti-duplikat: extract chat_id bersih dari filename
                     chat_id_from_file = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
                     if chat_id_from_file in self.audited_history:
-                        try: os.remove(file_path)
-                        except: pass
+                        # Jangan hapus langsung — pindahkan ke Data_Chat_Selesai/duplikat
+                        try:
+                            dup_folder = os.path.join(self.local_out, "_duplikat_skip")
+                            if not os.path.exists(dup_folder): os.makedirs(dup_folder)
+                            shutil.move(file_path, os.path.join(dup_folder, filename))
+                        except:
+                            try: os.remove(file_path)
+                            except: pass
                         continue
 
                     # Pastikan file sudah selesai ditulis (cek ukuran stabil)
@@ -2018,6 +2179,9 @@ class BrowserAuditApp:
                     # Skip file kosong/terlalu kecil
                     if len(content.strip()) < 50:
                         self.log(f"⚠️ File terlalu kecil, skip: {filename}")
+                        # Hapus dari processed_history agar bisa di-download ulang
+                        self.processed_history.discard(chat_id_from_file)
+                        self.save_history()
                         try: os.remove(file_path)
                         except: pass
                         continue
@@ -2122,7 +2286,7 @@ class BrowserAuditApp:
                                       "loading lama", "loading terlalu lama", "tidak bisa loading",
                                       "error login", "koneksi error", "connection error",
                                       "failed to login", "can't login", "cannot login"]
-                    audit_lower = audit_result.lower()
+                    audit_lower = (audit_result + "\n" + content).lower()
                     gagal_matched = [kw for kw in gagal_keywords if kw in audit_lower]
                     is_gagal_login = len(gagal_matched) > 0
 
@@ -2147,9 +2311,8 @@ class BrowserAuditApp:
                         if not os.path.exists(gagal_folder): os.makedirs(gagal_folder)
                         try:
                             shutil.move(file_path, os.path.join(gagal_folder, filename))
-                        except:
-                            try: os.remove(file_path)
-                            except: pass
+                        except Exception as mv_err:
+                            self.log(f"⚠️ Gagal pindah file {filename}: {str(mv_err)[:40]}")
                     elif is_lupa_password:
                         # Catat ke sheet tab "LUPA PASSWORD"
                         file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
@@ -2160,21 +2323,18 @@ class BrowserAuditApp:
                         t_folder = os.path.join(self.local_out, web_name, date_folder)
                         if not os.path.exists(t_folder): os.makedirs(t_folder)
                         try: shutil.move(file_path, os.path.join(t_folder, filename))
-                        except:
-                            try: os.remove(file_path)
-                            except: pass
+                        except Exception as mv_err:
+                            self.log(f"⚠️ Gagal pindah file {filename}: {str(mv_err)[:40]}")
                     else:
                         t_folder = os.path.join(self.local_out, web_name, date_folder)
                         if not os.path.exists(t_folder): os.makedirs(t_folder)
                         try: shutil.move(file_path, os.path.join(t_folder, filename))
-                        except:
-                            try: os.remove(file_path)
-                            except: pass
+                        except Exception as mv_err:
+                            self.log(f"⚠️ Gagal pindah file {filename}: {str(mv_err)[:40]}")
 
-                    # Catat ke audited history (anti-duplikat)
+                    # Catat ke audited history (anti-duplikat) — simpan setiap file
                     self.audited_history.add(chat_id_from_file)
-                    if len(self.audited_history) % 10 == 0:
-                        self.save_audited_history()
+                    self.save_audited_history()
                     # Rapikan batch di Data_Chat_Selesai setiap 250 file
                     if len(self.audited_history) % 250 == 0:
                         self.organize_batch_folders()
@@ -2432,10 +2592,10 @@ Link: {link_str}
                             else:
                                 block_reason = getattr(response, 'prompt_feedback', None)
                                 self.log(f"⚠️ Response diblokir: {block_reason}")
-                                result_text = f"{userid}\nTopik: Normal/Lancar\nLULUS"
+                                result_text = f"{userid}\nTopik: Blocked by Safety Filter\nPERLU PERBAIKAN (Response diblokir safety filter — perlu review manual)"
 
                         if not result_text:
-                            result_text = f"{userid}\nTopik: Normal/Lancar\nLULUS"
+                            result_text = f"{userid}\nTopik: Empty Response\nPERLU PERBAIKAN (AI tidak memberikan response — perlu review manual)"
 
                         return result_text, t_in, t_out
 
@@ -2594,7 +2754,19 @@ Link: {link_str}
                         return
                 except: pass
             worksheet.append_row(data_row)
-        except: pass
+        except Exception as e:
+            self.log(f"⚠️ GSheet gagal kirim: {str(e)[:60]} | Data: {data_row[:3]}")
+            # Simpan ke file lokal sebagai backup agar tidak hilang
+            try:
+                backup_file = os.path.join(self.app_path, "gsheet_backup.json")
+                backup_data = []
+                if os.path.exists(backup_file):
+                    with open(backup_file, "r") as f:
+                        backup_data = json.load(f)
+                backup_data.append({"tab": target_tab_name, "row": data_row, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+                with open(backup_file, "w") as f:
+                    json.dump(backup_data, f, indent=2)
+            except: pass
 
     def save_config_silent(self):
         """Simpan config tanpa popup."""
@@ -2656,6 +2828,37 @@ Link: {link_str}
                 with open(self.history_file, "r") as f: self.processed_history = set(json.load(f))
                 self.lbl_history_count.config(text=f"History: {len(self.processed_history)}")
             except: pass
+        # Sinkronkan dengan file yang sudah ada di disk
+        self.sync_history_from_files()
+
+    def sync_history_from_files(self):
+        """Scan file di Data_Chat_Masuk dan tambahkan ke history jika belum tercatat.
+        Ini mencegah re-download dan memperbaiki history yang hilang/kosong."""
+        try:
+            added = 0
+            for root_dir, dirs, files in os.walk(self.local_in):
+                for filename in files:
+                    if not filename.endswith(".txt"):
+                        continue
+                    # Extract chat_id dari nama file
+                    chat_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
+                    if chat_id and chat_id not in self.processed_history:
+                        self.processed_history.add(chat_id)
+                        added += 1
+            # Scan juga Data_Chat_Selesai
+            for root_dir, dirs, files in os.walk(self.local_out):
+                for filename in files:
+                    if not filename.endswith(".txt"):
+                        continue
+                    chat_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
+                    if chat_id and chat_id not in self.processed_history:
+                        self.processed_history.add(chat_id)
+                        added += 1
+            if added > 0:
+                self.save_history()
+                self.log(f"🔄 History sync: {added} file ditemukan di disk, ditambahkan ke history. Total: {len(self.processed_history)}")
+        except Exception as e:
+            self.log(f"⚠️ Sync history error: {str(e)[:60]}")
 
     def save_history(self):
         try:
