@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.7"
+APP_VERSION = "16.4.8"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -2868,43 +2868,80 @@ Link: {link_str}
         except Exception as e: messagebox.showerror("Error", str(e))
 
     def send_to_google_sheet(self, data_row, target_tab_name):
-        if not GSPREAD_AVAILABLE: return
+        if not GSPREAD_AVAILABLE:
+            self.log(f"⚠️ GSheet SKIP ({target_tab_name}): gspread library tidak tersedia")
+            return
         j = self.resolve_json_path(self.entry_gsheet_json.get().strip())
         n = self.entry_gsheet_name.get().strip()
-        if not j or not n: return
-        try:
-            scope = ["https://spreadsheets.google.com/feeds", 'https://www.googleapis.com/auth/spreadsheets', "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_name(j, scope)
-            client = gspread.authorize(creds)
-            spreadsheet = client.open_by_url(n) if "docs.google.com" in n else client.open(n)
-            target_tab_name = str(target_tab_name).strip().upper() or "OTHERS"
-            try: worksheet = spreadsheet.worksheet(target_tab_name)
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet = spreadsheet.add_worksheet(title=target_tab_name, rows=1000, cols=10)
-                worksheet.append_row(["Tanggal Chat", "Jam", "UserID", "Status", "Topik", "Detail/Saran", "Filename"])
-            # Cek duplikat: jika file_id (kolom terakhir) sudah ada di sheet, skip
-            file_id = data_row[-1] if data_row else ""
-            if file_id:
-                try:
-                    existing = worksheet.col_values(7)  # kolom Filename
-                    if file_id in existing:
-                        self.log(f"⏭ Sheet skip duplikat: {file_id}")
-                        return
-                except: pass
-            worksheet.append_row(data_row)
-        except Exception as e:
-            self.log(f"⚠️ GSheet gagal kirim: {str(e)[:60]} | Data: {data_row[:3]}")
-            # Simpan ke file lokal sebagai backup agar tidak hilang
+        if not j or not n:
+            self.log(f"⚠️ GSheet SKIP ({target_tab_name}): config kosong (json={bool(j)}, name={bool(n)})")
+            return
+
+        target_tab_upper = str(target_tab_name).strip().upper() or "OTHERS"
+        file_id = data_row[-1] if data_row else ""
+
+        # Retry 3x untuk handle transient API errors
+        last_err = None
+        for attempt in range(1, 4):
             try:
-                backup_file = os.path.join(self.app_path, "gsheet_backup.json")
-                backup_data = []
-                if os.path.exists(backup_file):
-                    with open(backup_file, "r") as f:
-                        backup_data = json.load(f)
-                backup_data.append({"tab": target_tab_name, "row": data_row, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-                with open(backup_file, "w") as f:
-                    json.dump(backup_data, f, indent=2)
-            except: pass
+                scope = ["https://spreadsheets.google.com/feeds", 'https://www.googleapis.com/auth/spreadsheets', "https://www.googleapis.com/auth/drive"]
+                creds = ServiceAccountCredentials.from_json_keyfile_name(j, scope)
+                client = gspread.authorize(creds)
+                spreadsheet = client.open_by_url(n) if "docs.google.com" in n else client.open(n)
+
+                # Case-insensitive tab lookup (handle "GAGAL LOGIN" vs "Gagal Login")
+                worksheet = None
+                try:
+                    all_ws = spreadsheet.worksheets()
+                    for ws in all_ws:
+                        if ws.title.strip().upper() == target_tab_upper:
+                            worksheet = ws
+                            break
+                except Exception:
+                    pass
+
+                if worksheet is None:
+                    # Belum ada → buat baru dengan nama upper-case
+                    worksheet = spreadsheet.add_worksheet(title=target_tab_upper, rows=1000, cols=10)
+                    worksheet.append_row(["Tanggal Chat", "Jam", "UserID", "Status", "Topik", "Detail/Saran", "Filename"])
+                    self.log(f"🆕 GSheet buat tab baru: {target_tab_upper}")
+
+                # Cek duplikat berdasarkan file_id di kolom 7
+                if file_id:
+                    try:
+                        existing = worksheet.col_values(7)
+                        if file_id in existing:
+                            self.log(f"⏭ Sheet skip duplikat: [{target_tab_upper}] {file_id}")
+                            return
+                    except Exception as dup_err:
+                        self.log(f"⚠️ Cek duplikat gagal (lanjut append): {str(dup_err)[:40]}")
+
+                worksheet.append_row(data_row)
+                self.log(f"✅ GSheet tulis [{target_tab_upper}]: {file_id}")
+                return  # sukses
+
+            except Exception as e:
+                last_err = e
+                err_str = str(e)[:80]
+                if attempt < 3:
+                    self.log(f"⚠️ GSheet attempt {attempt}/3 gagal [{target_tab_upper}]: {err_str} — retry 3s...")
+                    time.sleep(3)
+                else:
+                    self.log(f"❌ GSheet GAGAL 3x [{target_tab_upper}]: {err_str} | Data: {data_row[:3]}")
+
+        # Semua retry gagal → simpan ke backup
+        try:
+            backup_file = os.path.join(self.app_path, "gsheet_backup.json")
+            backup_data = []
+            if os.path.exists(backup_file):
+                with open(backup_file, "r") as f:
+                    backup_data = json.load(f)
+            backup_data.append({"tab": target_tab_upper, "row": data_row, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "error": str(last_err)[:100]})
+            with open(backup_file, "w") as f:
+                json.dump(backup_data, f, indent=2)
+            self.log(f"💾 Disimpan ke gsheet_backup.json: {file_id}")
+        except Exception as bk_err:
+            self.log(f"❌ Backup JSON juga gagal: {str(bk_err)[:40]}")
 
     def save_config_silent(self):
         """Simpan config tanpa popup."""
