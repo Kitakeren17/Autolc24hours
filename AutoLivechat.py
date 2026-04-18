@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.5"
+APP_VERSION = "16.4.6"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -2315,13 +2315,62 @@ class BrowserAuditApp:
                             except: pass
 
                     # --- CEK GAGAL LOGIN / LOADING LAMA (sesuai SOP Tugas 2) ---
-                    gagal_keywords = ["gagal login", "gagal koneksi", "gagal login/koneksi",
-                                      "tidak bisa login", "tidak bisa masuk", "login gagal",
-                                      "loading lama", "loading terlalu lama", "tidak bisa loading",
-                                      "error login", "koneksi error", "connection error",
-                                      "failed to login", "can't login", "cannot login"]
+                    gagal_keywords = [
+                        # Formal
+                        "gagal login", "gagal koneksi", "gagal login/koneksi",
+                        "tidak bisa login", "tidak bisa masuk", "tidak bisa akses",
+                        "login gagal", "masuk gagal", "akses gagal",
+                        "loading lama", "loading terlalu lama", "tidak bisa loading",
+                        "error login", "login error", "login eror", "eror login",
+                        "koneksi error", "connection error", "koneksi lemot", "koneksi lambat",
+                        "failed to login", "can't login", "cannot login",
+                        # Slang / informal Indonesia
+                        "ga bisa login", "gk bisa login", "gak bisa login", "g bisa login",
+                        "ga bisa masuk", "gk bisa masuk", "gak bisa masuk", "g bisa masuk",
+                        "ga bisa akses", "gk bisa akses", "gak bisa akses",
+                        "gabisa login", "gabisa masuk", "gabisa akses",
+                        "ngga bisa login", "nga bisa login", "ngga bisa masuk", "nga bisa masuk",
+                        "tdk bisa login", "tdk bisa masuk", "tdk bs login", "tdk bs masuk",
+                        "ga bs login", "gk bs login", "gak bs login",
+                        "susah login", "susah masuk", "sulit login", "sulit masuk",
+                        # Akun terkunci / blokir
+                        "akun ke lock", "akun kena lock", "akun terkunci", "akun ke-lock",
+                        "akun kena blokir", "akun terblokir", "akun diblokir", "akun di blokir",
+                        # Web/loading bermasalah
+                        "web nya ga kebuka", "web ga kebuka", "web tidak kebuka",
+                        "web nya error", "web error", "website error",
+                        "web nya lemot", "web lemot", "aplikasi lemot",
+                        "loading terus", "loading mulu", "stuck loading", "muter terus",
+                        # Provider/game tidak bisa dibuka (PG, Pragmatic, dll)
+                        "pg ga bisa dibuka", "pg gk bisa dibuka", "pg gak bisa dibuka",
+                        "pg ga bsa dibuka", "pg gk bsa dibuka", "pg tidak bisa dibuka",
+                        "pg tdk bisa dibuka", "pg ga kebuka", "pg tidak kebuka", "pg ga bisa di buka",
+                        "pg tidak bisa di buka", "pg error", "pg nya error", "pg nya ga bisa dibuka",
+                        "pragmatic ga bisa dibuka", "pragmatic gk bisa dibuka", "pragmatic gak bisa dibuka",
+                        "pragmatic tidak bisa dibuka", "pragmatic tdk bisa dibuka",
+                        "pragmatic tidak bisa di buka", "pragmatic ga bisa di buka",
+                        "pragmatic ga kebuka", "pragmatic tidak kebuka",
+                        "pragmatic error", "pragmatic nya error", "pragmatic nya ga bisa dibuka",
+                        "slot ga bisa dibuka", "slot tidak bisa dibuka", "slot ga kebuka",
+                        "game ga bisa dibuka", "game tidak bisa dibuka", "game ga kebuka",
+                        "provider ga bisa dibuka", "provider tidak bisa dibuka",
+                        "ga bisa dibuka", "tidak bisa dibuka", "tdk bisa dibuka", "ga kebuka",
+                    ]
                     audit_lower = (audit_result + "\n" + content).lower()
                     gagal_matched = [kw for kw in gagal_keywords if kw in audit_lower]
+
+                    # Regex fuzzy: (ga|gk|g|gak|ngga|nga|tdk|tidak) + (bisa|bs|dapat) + (login|masuk|akses/dibuka)
+                    fuzzy_pattern = r"\b(?:ga|gk|g|gak|gag|ngga|nga|tdk|tidak|ndak|gabisa|gabs)\s*(?:bisa|bs|dapat|dpt)?\s*(?:login|masuk|akses|loading|di\s*buka|dibuka|kebuka)\b"
+                    if re.search(fuzzy_pattern, audit_lower):
+                        if not gagal_matched:
+                            gagal_matched.append("fuzzy:tidak bisa login/masuk/akses/dibuka")
+
+                    # Regex fuzzy: provider (pg/pragmatic/slot/game) + (ga/tidak) + bisa + (dibuka/kebuka/akses)
+                    provider_pattern = r"\b(?:pg|pragmatic|slot|game|provider)\s+(?:soft\s+)?(?:nya\s+)?(?:ga|gk|g|gak|ngga|tdk|tidak|ndak)\s*(?:bisa|bs)?\s*(?:di\s*buka|dibuka|kebuka|akses|diakses|dimainkan|main)\b"
+                    if re.search(provider_pattern, audit_lower):
+                        if not any("provider" in m for m in gagal_matched):
+                            gagal_matched.append("fuzzy:provider tidak bisa dibuka")
+
                     is_gagal_login = len(gagal_matched) > 0
 
                     # --- CEK LUPA PASSWORD ---
