@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.4"
+APP_VERSION = "16.4.5"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -1317,16 +1317,46 @@ class BrowserAuditApp:
                 new_date = datetime.now().strftime("%Y-%m-%d")
                 if new_date != current_date:
                     self.log(f"🌅 Hari baru terdeteksi: {new_date}")
-                    # Download sisa hari kemarin dulu (Yesterday) sebelum pindah
-                    self.log(f"📥 Selesaikan download sisa {current_date} (Yesterday) dulu...")
-                    try:
-                        yesterday_dl = self._download_one_day("Yesterday")
-                        if yesterday_dl and yesterday_dl > 0:
-                            self.log(f"✅ {yesterday_dl} chat sisa {current_date} berhasil didownload.")
+                    # Tuntaskan Yesterday SAMPAI SELESAI — loop sampai done >= archives_total
+                    self.log(f"📥 Tuntaskan download {current_date} (Yesterday) sampai semua chat terdownload...")
+                    MAX_YESTERDAY_ROUNDS = 10
+                    empty_rounds = 0
+                    yesterday_done = False
+                    for r in range(1, MAX_YESTERDAY_ROUNDS + 1):
+                        if not self.is_auto_today:
+                            break
+                        self.log(f"🔁 Yesterday round {r}/{MAX_YESTERDAY_ROUNDS}...")
+                        try:
+                            y_dl = self._download_one_day("Yesterday")
+                        except Exception as e:
+                            self.log(f"⚠️ Error Yesterday round {r}: {str(e)[:60]}")
+                            y_dl = 0
+
+                        y_total = getattr(self, "_last_archives_total", None)
+                        y_done = getattr(self, "_last_final_downloaded", 0)
+
+                        if y_total:
+                            sisa = y_total - y_done
+                            self.log(f"📊 Yesterday round {r}: ⬇️{y_dl} baru | {y_done}/{y_total} | sisa={sisa}")
+                            if sisa <= 0:
+                                self.log(f"✅ Yesterday LENGKAP ({y_done}/{y_total}). Lanjut hari baru.")
+                                yesterday_done = True
+                                break
+                            # archives_total terdeteksi tapi masih kurang — lanjut round berikutnya
+                            empty_rounds = 0
                         else:
-                            self.log(f"✅ Tidak ada chat tersisa di {current_date}.")
-                    except Exception as e:
-                        self.log(f"⚠️ Error download sisa yesterday: {str(e)[:60]}")
+                            # Fallback: archives_total tidak terdeteksi → pakai logika "no new download"
+                            self.log(f"📊 Yesterday round {r}: ⬇️{y_dl} baru (total archives tidak terdeteksi)")
+                            if y_dl == 0:
+                                empty_rounds += 1
+                                if empty_rounds >= 2:
+                                    self.log(f"✅ {empty_rounds}x round tanpa chat baru. Anggap Yesterday selesai.")
+                                    yesterday_done = True
+                                    break
+                            else:
+                                empty_rounds = 0
+                    if not yesterday_done and self.is_auto_today:
+                        self.log(f"⚠️ Max {MAX_YESTERDAY_ROUNDS} round Yesterday tercapai tapi belum lengkap. Lanjut ke hari baru (sisa akan di-handle round berikutnya).")
                     self.log(f"➡️ Lanjut ke hari baru: {new_date}")
                     break
 
@@ -1608,6 +1638,10 @@ class BrowserAuditApp:
                     self.log(f"⚠️ {mode} ({date_display}) BELUM LENGKAP: {final_downloaded}/{archives_total} (kurang {selisih}) | ⬇️{downloaded} baru")
             else:
                 self.log(f"✅ {mode} ({date_display}) SELESAI: {final_downloaded} terdownload | ⬇️{downloaded} baru")
+
+            # Expose stats untuk outer loop (verifikasi Yesterday saat ganti hari)
+            self._last_archives_total = archives_total
+            self._last_final_downloaded = final_downloaded
 
             # Catat ke download stats per hari
             self.update_download_stats(date_display, downloaded, skipped, failed, archives_total)
