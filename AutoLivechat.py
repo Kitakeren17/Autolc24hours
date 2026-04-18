@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.6"
+APP_VERSION = "16.4.7"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -1379,31 +1379,82 @@ class BrowserAuditApp:
         self.log("⏹ AUTO TODAY 24H berhenti total.")
 
     def _get_archives_total(self):
-        """Baca total chat dari halaman LiveChat archives (jika ditampilkan di UI)."""
+        """Baca total chat dari halaman LiveChat archives.
+        Strategi: prefer pattern berlabel eksplisit ('of X', 'X chats', 'X results'),
+        ambil nilai maksimum. Reject badge/counter tanpa label (unreliable).
+        """
+        # --- PASS 1: pattern berlabel eksplisit (reliable) ---
+        labeled_candidates = []
         try:
-            # Coba cari elemen yang menampilkan total/count di halaman archives
-            total_selectors = [
-                "//*[contains(@class, 'counter')]",
-                "//*[contains(@class, 'badge')]",
-                "//*[contains(@class, 'total')]",
-                "//*[contains(@class, 'count')]",
+            labeled_xpaths = [
                 "//*[contains(text(), 'of ')]",
                 "//*[contains(text(), 'results')]",
                 "//*[contains(text(), 'chats')]",
+                "//*[contains(text(), 'Results')]",
+                "//*[contains(text(), 'Chats')]",
+                "//*[contains(text(), 'total')]",
+                "//*[contains(text(), 'Total')]",
             ]
-            for xpath in total_selectors:
+            for xpath in labeled_xpaths:
                 try:
                     els = self.driver.find_elements(By.XPATH, xpath)
                     for el in els:
                         txt = el.text.strip()
-                        # Cari angka dalam teks (misal "1,234 chats" atau "Showing 1 of 2500")
-                        nums = re.findall(r'[\d,]+', txt)
-                        for n in nums:
-                            num = int(n.replace(',', ''))
-                            if num > 0:  # terima semua angka valid (termasuk hari sepi < 50)
-                                return num
+                        if not txt or len(txt) > 200:
+                            continue
+                        # Pattern 1: "Showing X of Y" / "1-50 of 2,500" → ambil angka TERBESAR
+                        m_of = re.search(r'of\s+([\d,]+)', txt, re.IGNORECASE)
+                        if m_of:
+                            try:
+                                labeled_candidates.append(int(m_of.group(1).replace(',', '')))
+                                continue
+                            except: pass
+                        # Pattern 2: "2,500 chats" / "2500 results"
+                        m_cr = re.search(r'([\d,]+)\s*(?:chats?|results?)', txt, re.IGNORECASE)
+                        if m_cr:
+                            try:
+                                labeled_candidates.append(int(m_cr.group(1).replace(',', '')))
+                                continue
+                            except: pass
+                        # Pattern 3: "Total: 2,500"
+                        m_tot = re.search(r'total\s*[:\s]\s*([\d,]+)', txt, re.IGNORECASE)
+                        if m_tot:
+                            try:
+                                labeled_candidates.append(int(m_tot.group(1).replace(',', '')))
+                            except: pass
                 except: continue
         except: pass
+
+        if labeled_candidates:
+            # Pilih maksimum dari kandidat berlabel (total biasanya angka terbesar)
+            return max(labeled_candidates)
+
+        # --- PASS 2: fallback badge/counter — hanya terima angka masuk akal (>= 10) ---
+        unlabeled_candidates = []
+        try:
+            unlabeled_xpaths = [
+                "//*[contains(@class, 'total')]",
+                "//*[contains(@class, 'count')]",
+            ]
+            for xpath in unlabeled_xpaths:
+                try:
+                    els = self.driver.find_elements(By.XPATH, xpath)
+                    for el in els:
+                        txt = el.text.strip()
+                        if not txt or len(txt) > 30:
+                            continue
+                        nums = re.findall(r'[\d,]+', txt)
+                        for n in nums:
+                            try:
+                                num = int(n.replace(',', ''))
+                                if num >= 10:  # reject badge kecil (notifikasi, dsb)
+                                    unlabeled_candidates.append(num)
+                            except: pass
+                except: continue
+        except: pass
+
+        if unlabeled_candidates:
+            return max(unlabeled_candidates)
         return None
 
     def _count_downloaded_for_date(self, date_str):
@@ -1487,6 +1538,10 @@ class BrowserAuditApp:
                 # --- CEK PROGRESS ---
                 archives_total = self._get_archives_total()
                 already_downloaded = self._count_downloaded_for_date(date_display)
+                # Sanity check: archives_total < downloaded → angka UI tidak valid
+                if archives_total and archives_total < already_downloaded:
+                    self.log(f"⚠️ Archives={archives_total} < Downloaded={already_downloaded}. Angka UI tidak valid, abaikan & scan normal.")
+                    archives_total = None
                 if archives_total:
                     remaining = max(0, archives_total - already_downloaded)
                     self.log(f"📊 Archives={archives_total} | Downloaded={already_downloaded} | Sisa={remaining}")
