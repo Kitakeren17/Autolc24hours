@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.8"
+APP_VERSION = "16.4.9"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -1538,18 +1538,23 @@ class BrowserAuditApp:
                 # --- CEK PROGRESS ---
                 archives_total = self._get_archives_total()
                 already_downloaded = self._count_downloaded_for_date(date_display)
-                # Sanity check: archives_total < downloaded → angka UI tidak valid
+                # Sanity check 1: archives_total < downloaded → angka UI tidak valid
                 if archives_total and archives_total < already_downloaded:
                     self.log(f"⚠️ Archives={archives_total} < Downloaded={already_downloaded}. Angka UI tidak valid, abaikan & scan normal.")
                     archives_total = None
                 if archives_total:
                     remaining = max(0, archives_total - already_downloaded)
                     self.log(f"📊 Archives={archives_total} | Downloaded={already_downloaded} | Sisa={remaining}")
-                    if remaining == 0:
+                    # Sanity check 2: JANGAN early-exit kalau belum ada file tersimpan hari ini.
+                    # "Semua sudah terdownload" padahal 0 file = pasti angka UI salah.
+                    if remaining == 0 and already_downloaded == 0:
+                        self.log(f"⚠️ Archives={archives_total} match tapi Downloaded=0. Angka UI mencurigakan, tetap scan.")
+                        archives_total = None
+                    elif remaining == 0:
                         self.log(f"✅ Semua chat {date_display} sudah terdownload!")
                         return downloaded
-                else:
-                    self.log(f"📊 Sudah download={already_downloaded} (total archives tidak terdeteksi)")
+                if not archives_total:
+                    self.log(f"📊 Sudah download={already_downloaded} (total archives tidak terdeteksi / diabaikan)")
 
                 SEL_LIST = self.find_chat_list_selector()
                 if not SEL_LIST:
