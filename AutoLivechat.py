@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.5.0"
+APP_VERSION = "16.5.1"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -214,11 +214,47 @@ class BrowserAuditApp:
     def extract_userid(self, content):
         match = re.search(r"User\s*ID\s*([^:]*):\s*(.*)", content, re.IGNORECASE)
         if match:
-            web = match.group(1).strip().upper() 
+            web = match.group(1).strip().upper()
             uid = match.group(2).strip()
             return f"USERID {web} : {uid}" if web else f"USERID : {uid}"
         m2 = re.search(r"USER\s*ID\s*:\s*(.*)", content, re.IGNORECASE)
         return f"USERID : {m2.group(1).strip()}" if m2 else "USERID Tidak Ditemukan"
+
+    def _extract_member_text(self, content):
+        """Ambil hanya pesan member dari transcript (skip greeting bot, CS responses, template).
+        Speaker line format: 'NAMA (Day, M/D/YYYY, HH:MM:SS am/pm Asia/Bangkok)'.
+        CS/Admin di-detect dari prefix nama (ADMIN, CS, AGENT, AGEN, BOT, SUPPORT, OPERATOR).
+        """
+        # Cari userid member dari header
+        m = re.search(r"User\s*ID\s*[^:]*:\s*(\S+)", content, re.IGNORECASE)
+        member_userid = m.group(1).strip().lower() if m else None
+
+        cs_prefixes = ("admin", "cs ", "agent", "agen", "bot", "support", "operator", "robot")
+        speaker_re = re.compile(r"^(.+?)\s*\(\s*\w{3},?\s*\d", re.IGNORECASE)
+
+        member_lines = []
+        current_is_member = False
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            sm = speaker_re.match(stripped)
+            if sm:
+                speaker = sm.group(1).strip().lower()
+                if member_userid and speaker == member_userid:
+                    current_is_member = True
+                elif speaker.startswith(cs_prefixes):
+                    current_is_member = False
+                else:
+                    # Default: kalau bukan CS prefix dan match userid member, anggap member
+                    current_is_member = True if not speaker.startswith(cs_prefixes) else False
+                continue  # speaker line itu sendiri tidak diambil
+            # Skip baris struktur header
+            if stripped.startswith(("UserID ", "Pilih bagian:", "LiveChat conversation", "----------")):
+                continue
+            if current_is_member:
+                member_lines.append(stripped)
+        return "\n".join(member_lines)
         
     def extract_web_name(self, content):
         match = re.search(r"User\s*ID\s*\(?([A-Za-z0-9]+)\)?\s*:", content, re.IGNORECASE)
@@ -2416,24 +2452,33 @@ class BrowserAuditApp:
                         "provider ga bisa dibuka", "provider tidak bisa dibuka",
                         "ga bisa dibuka", "tidak bisa dibuka", "tdk bisa dibuka", "ga kebuka",
                     ]
-                    audit_lower = (audit_result + "\n" + content).lower()
-                    content_lower_full = content.lower()
-                    gagal_matched = [kw for kw in gagal_keywords if kw in audit_lower]
+                    # Pesan MEMBER saja (skip greeting bot + CS responses + template)
+                    member_text = self._extract_member_text(content)
+                    member_lower = member_text.lower()
+                    audit_lower = audit_result.lower()
+                    gagal_matched = [kw for kw in gagal_keywords if kw in member_lower]
 
                     # Regex fuzzy: WAJIB ada connector (bisa|bs|dapat) supaya "gak masuk" (konteks WD) tidak match
                     fuzzy_pattern = r"\b(?:ga|gk|g|gak|gag|ngga|nga|tdk|tidak|ndak|gabisa|gabs)\s+(?:bisa|bs|dapat|dpt)\s+(?:login|masuk|akses|loading|di\s*buka|dibuka|kebuka)\b"
-                    if re.search(fuzzy_pattern, audit_lower):
+                    if re.search(fuzzy_pattern, member_lower):
                         if not gagal_matched:
                             gagal_matched.append("fuzzy:tidak bisa login/masuk/akses/dibuka")
 
                     # Regex fuzzy: provider (pg/pragmatic/slot/game) + (ga/tidak) + bisa + (dibuka/kebuka/akses)
                     provider_pattern = r"\b(?:pg|pragmatic|slot|game|provider)\s+(?:soft\s+)?(?:nya\s+)?(?:ga|gk|g|gak|ngga|tdk|tidak|ndak)\s*(?:bisa|bs)?\s*(?:di\s*buka|dibuka|kebuka|akses|diakses|dimainkan|main)\b"
-                    if re.search(provider_pattern, audit_lower):
+                    if re.search(provider_pattern, member_lower):
                         if not any("provider" in m for m in gagal_matched):
                             gagal_matched.append("fuzzy:provider tidak bisa dibuka")
 
-                    # ANTI-FALSE-POSITIVE: kalau chat konteks WD/Depo/saldo dan tidak ada kata 'login' eksplisit, skip flag
-                    if gagal_matched:
+                    # AI override: kalau audit_result eksplisit bilang gagal login, tetap flag
+                    ai_explicit_login = any(kw in audit_lower for kw in [
+                        "gagal login", "tidak bisa login", "ga bisa login", "gk bisa login",
+                        "login error", "error login"])
+                    if ai_explicit_login and not gagal_matched:
+                        gagal_matched.append("ai-flag:gagal login dari audit_result")
+
+                    # ANTI-FALSE-POSITIVE: kalau member text konteks WD/Depo dan tidak ada konteks login member, skip
+                    if gagal_matched and not ai_explicit_login:
                         wd_context_kw = ["wd", "withdraw", "tarik dana", "penarikan", "cairkan",
                                          "deposit", "depo", "setor", "transfer", "top up",
                                          "saldo", "dana", "uang", "duit", "rekening", "belum masuk",
@@ -2441,17 +2486,11 @@ class BrowserAuditApp:
                         login_context_kw = ["login", "loging", "log in", "masuk akun", "akun saya",
                                             "password", "username", "user id", "user name", "akses akun",
                                             "akun terblokir", "akun ke-lock", "akun kena", "akun tidak"]
-                        has_wd_context = any(kw in content_lower_full for kw in wd_context_kw)
-                        has_login_context = any(kw in content_lower_full for kw in login_context_kw)
-                        # Hanya skip kalau ada konteks WD TAPI tidak ada konteks login sama sekali
+                        has_wd_context = any(kw in member_lower for kw in wd_context_kw)
+                        has_login_context = any(kw in member_lower for kw in login_context_kw)
                         if has_wd_context and not has_login_context:
-                            # Cek tambahan: kalau audit_result eksplisit bilang gagal login, tetap flag
-                            ai_explicit_login = any(kw in audit_lower for kw in [
-                                "gagal login", "tidak bisa login", "ga bisa login", "gk bisa login",
-                                "login error", "error login"])
-                            if not ai_explicit_login:
-                                self.log(f"⚠️ Gagal-login keyword match tapi konteks WD/Depo. Skip flag: {gagal_matched[:2]}")
-                                gagal_matched = []
+                            self.log(f"⚠️ Gagal-login match tapi konteks WD/Depo (member-only). Skip: {gagal_matched[:2]}")
+                            gagal_matched = []
 
                     is_gagal_login = len(gagal_matched) > 0
 
