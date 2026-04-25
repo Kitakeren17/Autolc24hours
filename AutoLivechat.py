@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.4.9"
+APP_VERSION = "16.5.0"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -2417,10 +2417,11 @@ class BrowserAuditApp:
                         "ga bisa dibuka", "tidak bisa dibuka", "tdk bisa dibuka", "ga kebuka",
                     ]
                     audit_lower = (audit_result + "\n" + content).lower()
+                    content_lower_full = content.lower()
                     gagal_matched = [kw for kw in gagal_keywords if kw in audit_lower]
 
-                    # Regex fuzzy: (ga|gk|g|gak|ngga|nga|tdk|tidak) + (bisa|bs|dapat) + (login|masuk|akses/dibuka)
-                    fuzzy_pattern = r"\b(?:ga|gk|g|gak|gag|ngga|nga|tdk|tidak|ndak|gabisa|gabs)\s*(?:bisa|bs|dapat|dpt)?\s*(?:login|masuk|akses|loading|di\s*buka|dibuka|kebuka)\b"
+                    # Regex fuzzy: WAJIB ada connector (bisa|bs|dapat) supaya "gak masuk" (konteks WD) tidak match
+                    fuzzy_pattern = r"\b(?:ga|gk|g|gak|gag|ngga|nga|tdk|tidak|ndak|gabisa|gabs)\s+(?:bisa|bs|dapat|dpt)\s+(?:login|masuk|akses|loading|di\s*buka|dibuka|kebuka)\b"
                     if re.search(fuzzy_pattern, audit_lower):
                         if not gagal_matched:
                             gagal_matched.append("fuzzy:tidak bisa login/masuk/akses/dibuka")
@@ -2430,6 +2431,27 @@ class BrowserAuditApp:
                     if re.search(provider_pattern, audit_lower):
                         if not any("provider" in m for m in gagal_matched):
                             gagal_matched.append("fuzzy:provider tidak bisa dibuka")
+
+                    # ANTI-FALSE-POSITIVE: kalau chat konteks WD/Depo/saldo dan tidak ada kata 'login' eksplisit, skip flag
+                    if gagal_matched:
+                        wd_context_kw = ["wd", "withdraw", "tarik dana", "penarikan", "cairkan",
+                                         "deposit", "depo", "setor", "transfer", "top up",
+                                         "saldo", "dana", "uang", "duit", "rekening", "belum masuk",
+                                         "gak masuk", "ga masuk", "blm masuk", "belom masuk"]
+                        login_context_kw = ["login", "loging", "log in", "masuk akun", "akun saya",
+                                            "password", "username", "user id", "user name", "akses akun",
+                                            "akun terblokir", "akun ke-lock", "akun kena", "akun tidak"]
+                        has_wd_context = any(kw in content_lower_full for kw in wd_context_kw)
+                        has_login_context = any(kw in content_lower_full for kw in login_context_kw)
+                        # Hanya skip kalau ada konteks WD TAPI tidak ada konteks login sama sekali
+                        if has_wd_context and not has_login_context:
+                            # Cek tambahan: kalau audit_result eksplisit bilang gagal login, tetap flag
+                            ai_explicit_login = any(kw in audit_lower for kw in [
+                                "gagal login", "tidak bisa login", "ga bisa login", "gk bisa login",
+                                "login error", "error login"])
+                            if not ai_explicit_login:
+                                self.log(f"⚠️ Gagal-login keyword match tapi konteks WD/Depo. Skip flag: {gagal_matched[:2]}")
+                                gagal_matched = []
 
                     is_gagal_login = len(gagal_matched) > 0
 
