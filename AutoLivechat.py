@@ -2488,26 +2488,34 @@ class BrowserAuditApp:
                     tanggal = f"{_chat_dt.day}/{_chat_dt.month}/{_chat_dt.year}"
                     tgl = _chat_dt.strftime("%d/%m/%Y")
 
-                    if is_failed:
-                        jenis = "SALAH CS"
-                        keterangan = detail
-                    elif is_sop2 or is_perlu_perbaikan:
-                        jenis = "EVALUASI BOT"
-                        keterangan = detail
-                    elif is_gagal_login:
-                        jenis = "CATAT ID"
-                        keterangan = gagal_matched[0].title() if gagal_matched else "Gagal Login"
-                    elif is_lupa_password:
-                        jenis = "CATAT ID"
-                        keterangan = "LUPA PASSWORD"
-                    else:
-                        jenis = "AMAN"
-                        keterangan = "AMAN"
+                    # Isi 3 kolom analisa secara independen (bisa lebih dari 1 terisi)
+                    col_catat_id = ""
+                    col_salah_cs = ""
+                    col_evaluasi = ""
 
-                    sheet_row = [tanggal_jam, file_id, userid, jenis, keterangan]
-                    threading.Thread(target=self.send_to_google_sheet,
-                                     args=(sheet_row, web_name), daemon=True).start()
-                    self.log(f"📊 Sheet [{web_name}] {jenis}: {userid}")
+                    if is_gagal_login:
+                        col_catat_id = gagal_matched[0].title() if gagal_matched else "Gagal Login"
+                    if is_lupa_password and not col_catat_id:
+                        col_catat_id = "LUPA PASSWORD"
+                    if is_failed:
+                        col_salah_cs = detail
+                    if is_sop2 or is_perlu_perbaikan:
+                        col_evaluasi = detail
+
+                    # Hanya kirim ke sheet jika ada minimal 1 pelanggaran
+                    has_violation = col_catat_id or col_salah_cs or col_evaluasi
+                    if has_violation:
+                        sheet_row = [tanggal_jam, file_id, userid, col_catat_id, col_salah_cs, col_evaluasi]
+                        threading.Thread(target=self.send_to_google_sheet,
+                                         args=(sheet_row, web_name), daemon=True).start()
+                        jenis_log = " | ".join(filter(None, [
+                            f"CATAT ID:{col_catat_id}" if col_catat_id else "",
+                            f"SALAH CS:{col_salah_cs[:20]}" if col_salah_cs else "",
+                            f"EVALUASI:{col_evaluasi[:20]}" if col_evaluasi else "",
+                        ]))
+                        self.log(f"📊 Sheet [{web_name}] {jenis_log}: {userid}")
+                    else:
+                        self.log(f"✅ AMAN [{web_name}]: {userid}")
 
                     # --- PINDAH FILE ---
                     date_folder = chat_date if chat_date else datetime.now().strftime("%Y-%m-%d")
@@ -2958,7 +2966,7 @@ Link: {link_str}
                 if worksheet is None:
                     # Belum ada → buat baru dengan nama upper-case
                     worksheet = spreadsheet.add_worksheet(title=target_tab_upper, rows=1000, cols=10)
-                    worksheet.append_row(["Tanggal Analisis", "FILE NAME", "Username", "Pelanggaran", "KETERANGAN"])
+                    worksheet.append_row(["Tanggal Analisis", "FILE NAME", "Username", "CATAT ID", "SALAH CS", "EVALUASI BOT"])
                     self.log(f"🆕 GSheet buat tab baru: {target_tab_upper}")
 
                 # Cek duplikat berdasarkan file_id di kolom 7
