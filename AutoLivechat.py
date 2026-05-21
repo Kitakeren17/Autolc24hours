@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.5.4"
+APP_VERSION = "16.5.5"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -2356,9 +2356,15 @@ class BrowserAuditApp:
                     detail = ""
                     if is_failed or is_sop2 or is_perlu_perbaikan:
                         m = re.search(r"(?:TIDAK LULUS|SOP 2|PERLU PERBAIKAN)\s*[\(\[]\s*(.*?)\s*[\)\]]", audit_result, re.IGNORECASE | re.DOTALL)
-                        detail = m.group(1).strip() if m else "Deteksi Temuan"
+                        detail = m.group(1).strip() if m else ""
                         detail = re.sub(r"^Tugas\s*\d+\s*[-–:]\s*", "", detail, flags=re.IGNORECASE).strip()
                         detail = re.sub(r"^(?:Hashtag & Pendaftaran|Respon Deposit & Withdraw|Bonus|Etika & Standar Pelayanan|Teknis & Gangguan|Kinerja Bot & (?:Kelalaian )?Handover|Kategori)\s*[-–:]\s*", "", detail, flags=re.IGNORECASE).strip()
+                        # Fallback ke baris Analisa jika detail kosong
+                        if not detail:
+                            ma = re.search(r"Analisa\s*:\s*(.+?)(?:\n|$)", audit_result, re.IGNORECASE)
+                            detail = ma.group(1).strip() if ma else ""
+                        if not detail:
+                            detail = "Perlu Evaluasi"
 
                         content_lower = content.lower()
                         if "deposit/withdraw" in detail.lower() or "deposit/wd" in detail.lower() or "depo/wd" in detail.lower():
@@ -2509,20 +2515,28 @@ class BrowserAuditApp:
                     if is_sop2 or is_perlu_perbaikan:
                         col_evaluasi = detail
 
-                    # Hanya kirim ke sheet jika ada minimal 1 pelanggaran
                     has_violation = col_catat_id or col_salah_cs or col_evaluasi
-                    if has_violation:
-                        sheet_row = [tanggal_jam, file_id, userid, col_catat_id, col_salah_cs, col_evaluasi]
-                        threading.Thread(target=self.send_to_google_sheet,
-                                         args=(sheet_row, web_name), daemon=True).start()
+                    if not has_violation:
+                        # Chat AMAN — tulis "AMAN" di ketiga kolom
+                        col_catat_id = "AMAN"
+                        col_salah_cs = "AMAN"
+                        col_evaluasi = "AMAN"
+                        col_keterangan = "AMAN"
+                        jenis_log = "AMAN"
+                    else:
+                        # Kolom G: ringkasan semua keterangan yang ada
+                        parts = [v for v in [col_catat_id, col_salah_cs, col_evaluasi] if v]
+                        col_keterangan = " | ".join(parts)
                         jenis_log = " | ".join(filter(None, [
                             f"CATAT ID:{col_catat_id}" if col_catat_id else "",
                             f"SALAH CS:{col_salah_cs[:20]}" if col_salah_cs else "",
                             f"EVALUASI:{col_evaluasi[:20]}" if col_evaluasi else "",
                         ]))
-                        self.log(f"📊 Sheet [{web_name}] {jenis_log}: {userid}")
-                    else:
-                        self.log(f"✅ AMAN [{web_name}]: {userid}")
+
+                    sheet_row = [tanggal_jam, file_id, userid, col_catat_id, col_salah_cs, col_evaluasi, col_keterangan]
+                    threading.Thread(target=self.send_to_google_sheet,
+                                     args=(sheet_row, web_name), daemon=True).start()
+                    self.log(f"📊 Sheet [{web_name}] {jenis_log}: {userid}")
 
                     # --- PINDAH FILE ---
                     date_folder = chat_date if chat_date else datetime.now().strftime("%Y-%m-%d")
@@ -2973,7 +2987,7 @@ Link: {link_str}
                 if worksheet is None:
                     # Belum ada → buat baru dengan nama upper-case
                     worksheet = spreadsheet.add_worksheet(title=target_tab_upper, rows=1000, cols=10)
-                    worksheet.append_row(["Tanggal Analisis", "FILE NAME", "Username", "CATAT ID", "SALAH CS", "EVALUASI BOT"])
+                    worksheet.append_row(["Tanggal Analisis", "FILE NAME", "Username", "CATAT ID", "SALAH CS", "EVALUASI BOT", "KETERANGAN"])
                     self.log(f"🆕 GSheet buat tab baru: {target_tab_upper}")
 
                 # Cek duplikat berdasarkan file_id di kolom 7
