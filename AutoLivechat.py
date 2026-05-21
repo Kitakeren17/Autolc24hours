@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.5.1"
+APP_VERSION = "16.5.2"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -2346,18 +2346,15 @@ class BrowserAuditApp:
                     is_sop2 = "SOP 2" in audit_res_up or "TEMUAN TOPIK 2" in audit_res_up
                     is_perlu_perbaikan = "PERLU PERBAIKAN" in audit_res_up
 
+                    detail = ""
                     if is_failed or is_sop2 or is_perlu_perbaikan:
-                        status_label = "TIDAK LULUS" if is_failed else "PERLU PERBAIKAN"
                         m = re.search(r"(?:TIDAK LULUS|SOP 2|PERLU PERBAIKAN)\s*[\(\[]\s*(.*?)\s*[\)\]]", audit_result, re.IGNORECASE | re.DOTALL)
                         detail = m.group(1).strip() if m else "Deteksi Temuan"
-                        # Bersihkan prefix Tugas/Kategori dari detail
                         detail = re.sub(r"^Tugas\s*\d+\s*[-–:]\s*", "", detail, flags=re.IGNORECASE).strip()
                         detail = re.sub(r"^(?:Hashtag & Pendaftaran|Respon Deposit & Withdraw|Bonus|Etika & Standar Pelayanan|Teknis & Gangguan|Kinerja Bot & (?:Kelalaian )?Handover|Kategori)\s*[-–:]\s*", "", detail, flags=re.IGNORECASE).strip()
 
-                        # --- SPESIFIKKAN DETAIL YANG CAMPUR (Deposit/Withdraw → pilih salah satu) ---
                         content_lower = content.lower()
                         if "deposit/withdraw" in detail.lower() or "deposit/wd" in detail.lower() or "depo/wd" in detail.lower():
-                            # Cek dari transcript apakah masalahnya deposit atau withdraw
                             has_wd = any(k in content_lower for k in ["withdraw", " wd ", "tarik dana", "penarikan", "cairkan"])
                             has_depo = any(k in content_lower for k in ["deposit", " depo ", "setor", "transfer masuk", "top up"])
                             if has_wd and not has_depo:
@@ -2368,7 +2365,6 @@ class BrowserAuditApp:
                                 detail = detail.replace("Deposit/Withdraw", "Deposit").replace("deposit/withdraw", "deposit")
                                 detail = detail.replace("Deposit/WD", "Deposit").replace("deposit/wd", "deposit")
                                 detail = detail.replace("Depo/WD", "Deposit").replace("depo/wd", "deposit")
-                            # Kalau dua-duanya ada, biarkan yang paling dominan
                             elif has_wd and has_depo:
                                 wd_count = sum(content_lower.count(k) for k in ["withdraw", " wd ", "tarik dana"])
                                 depo_count = sum(content_lower.count(k) for k in ["deposit", " depo ", "setor"])
@@ -2379,12 +2375,7 @@ class BrowserAuditApp:
                                     detail = detail.replace("Deposit/Withdraw", "Deposit").replace("deposit/withdraw", "deposit")
                                     detail = detail.replace("Deposit/WD", "Deposit").replace("deposit/wd", "deposit")
 
-                        # --- DETEKSI KATEGORI SOP DARI DETAIL ---
                         kategori = self._detect_sop_category(detail, audit_result)
-
-                        file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
-                        row = [chat_date, chat_time, userid, status_label, kategori, detail, file_id]
-                        self.send_to_google_sheet(row, web_name)
                         self.increment_stats(is_noteworthy=True, web_name=web_name, cost=chat_cost_idr)
                         if self.saran_ai_enabled and "SARAN AI:" in audit_res_up:
                             saran_match = re.search(r"Saran AI:\s*(.*)", audit_result, re.IGNORECASE)
@@ -2410,123 +2401,121 @@ class BrowserAuditApp:
                                     requests.post(f"https://api.telegram.org/bot{self.entry_tele_token.get()}/sendDocument", files={'document': f}, data={'chat_id': self.entry_tele_chatid.get(), 'caption': "📜 Transkrip Pelanggaran"})
                             except: pass
 
-                    # --- CEK GAGAL LOGIN / LOADING LAMA (sesuai SOP Tugas 2) ---
+                    # --- CEK GAGAL LOGIN / AKSES SITUS & LINK NAWALA ---
                     gagal_keywords = [
-                        # Formal
                         "gagal login", "gagal koneksi", "gagal login/koneksi",
-                        "tidak bisa login", "tidak bisa masuk", "tidak bisa akses",
-                        "login gagal", "masuk gagal", "akses gagal",
+                        "tidak bisa login", "tidak bisa akses",
+                        "login gagal", "akses gagal",
                         "loading lama", "loading terlalu lama", "tidak bisa loading",
                         "error login", "login error", "login eror", "eror login",
                         "koneksi error", "connection error", "koneksi lemot", "koneksi lambat",
                         "failed to login", "can't login", "cannot login",
-                        # Slang / informal Indonesia
                         "ga bisa login", "gk bisa login", "gak bisa login", "g bisa login",
-                        "ga bisa masuk", "gk bisa masuk", "gak bisa masuk", "g bisa masuk",
                         "ga bisa akses", "gk bisa akses", "gak bisa akses",
-                        "gabisa login", "gabisa masuk", "gabisa akses",
-                        "ngga bisa login", "nga bisa login", "ngga bisa masuk", "nga bisa masuk",
-                        "tdk bisa login", "tdk bisa masuk", "tdk bs login", "tdk bs masuk",
+                        "gabisa login", "gabisa akses",
+                        "ngga bisa login", "nga bisa login",
+                        "tdk bisa login", "tdk bs login",
                         "ga bs login", "gk bs login", "gak bs login",
-                        "susah login", "susah masuk", "sulit login", "sulit masuk",
-                        # Akun terkunci / blokir
-                        "akun ke lock", "akun kena lock", "akun terkunci", "akun ke-lock",
-                        "akun kena blokir", "akun terblokir", "akun diblokir", "akun di blokir",
-                        # Web/loading bermasalah
+                        "susah login", "sulit login",
                         "web nya ga kebuka", "web ga kebuka", "web tidak kebuka",
                         "web nya error", "web error", "website error",
-                        "web nya lemot", "web lemot", "aplikasi lemot",
+                        "web nya lemot", "web lemot",
+                        "situs error", "situs lemot", "situs ga kebuka", "situs tidak kebuka",
                         "loading terus", "loading mulu", "stuck loading", "muter terus",
-                        # Provider/game tidak bisa dibuka (PG, Pragmatic, dll)
-                        "pg ga bisa dibuka", "pg gk bisa dibuka", "pg gak bisa dibuka",
-                        "pg ga bsa dibuka", "pg gk bsa dibuka", "pg tidak bisa dibuka",
-                        "pg tdk bisa dibuka", "pg ga kebuka", "pg tidak kebuka", "pg ga bisa di buka",
-                        "pg tidak bisa di buka", "pg error", "pg nya error", "pg nya ga bisa dibuka",
-                        "pragmatic ga bisa dibuka", "pragmatic gk bisa dibuka", "pragmatic gak bisa dibuka",
-                        "pragmatic tidak bisa dibuka", "pragmatic tdk bisa dibuka",
-                        "pragmatic tidak bisa di buka", "pragmatic ga bisa di buka",
-                        "pragmatic ga kebuka", "pragmatic tidak kebuka",
-                        "pragmatic error", "pragmatic nya error", "pragmatic nya ga bisa dibuka",
-                        "slot ga bisa dibuka", "slot tidak bisa dibuka", "slot ga kebuka",
-                        "game ga bisa dibuka", "game tidak bisa dibuka", "game ga kebuka",
-                        "provider ga bisa dibuka", "provider tidak bisa dibuka",
-                        "ga bisa dibuka", "tidak bisa dibuka", "tdk bisa dibuka", "ga kebuka",
+                        "link nawala", "link alternatif nawala", "link mati",
+                        "link kadaluarsa", "link expired", "link tidak valid", "link invalid",
+                        "link alternatif tidak bisa", "link alt tidak bisa",
+                        "link ga bisa dibuka", "link tidak bisa dibuka",
+                        "link alternatif ga bisa", "link alternatif tidak bisa dibuka",
+                        "link alternatif error", "link alt error",
+                        "link ga kebuka", "link tidak kebuka", "link alt ga kebuka",
                     ]
-                    # Pesan MEMBER saja (skip greeting bot + CS responses + template)
                     member_text = self._extract_member_text(content)
                     member_lower = member_text.lower()
                     audit_lower = audit_result.lower()
                     gagal_matched = [kw for kw in gagal_keywords if kw in member_lower]
 
-                    # Regex fuzzy: WAJIB ada connector (bisa|bs|dapat) supaya "gak masuk" (konteks WD) tidak match
-                    fuzzy_pattern = r"\b(?:ga|gk|g|gak|gag|ngga|nga|tdk|tidak|ndak|gabisa|gabs)\s+(?:bisa|bs|dapat|dpt)\s+(?:login|masuk|akses|loading|di\s*buka|dibuka|kebuka)\b"
+                    fuzzy_pattern = r"\b(?:ga|gk|g|gak|gag|ngga|nga|tdk|tidak|ndak|gabisa|gabs)\s+(?:bisa|bs|dapat|dpt)\s+(?:login|akses|loading)\b"
                     if re.search(fuzzy_pattern, member_lower):
-                        if not gagal_matched:
-                            gagal_matched.append("fuzzy:tidak bisa login/masuk/akses/dibuka")
+                        if not gagal_matched: gagal_matched.append("fuzzy:tidak bisa login/akses")
 
-                    # Regex fuzzy: provider (pg/pragmatic/slot/game) + (ga/tidak) + bisa + (dibuka/kebuka/akses)
-                    provider_pattern = r"\b(?:pg|pragmatic|slot|game|provider)\s+(?:soft\s+)?(?:nya\s+)?(?:ga|gk|g|gak|ngga|tdk|tidak|ndak)\s*(?:bisa|bs)?\s*(?:di\s*buka|dibuka|kebuka|akses|diakses|dimainkan|main)\b"
-                    if re.search(provider_pattern, member_lower):
-                        if not any("provider" in m for m in gagal_matched):
-                            gagal_matched.append("fuzzy:provider tidak bisa dibuka")
+                    link_nawala_pattern = r"\blink\s+(?:alternatif\s+)?(?:nya\s+)?(?:ga|gk|g|gak|ngga|tdk|tidak|ndak)\s*(?:bisa|bs)?\s*(?:di\s*buka|dibuka|kebuka|akses|diakses|muncul|aktif|valid)\b"
+                    if re.search(link_nawala_pattern, member_lower):
+                        if not gagal_matched: gagal_matched.append("fuzzy:link alternatif tidak bisa dibuka/nawala")
 
-                    # AI override: kalau audit_result eksplisit bilang gagal login, tetap flag
                     ai_explicit_login = any(kw in audit_lower for kw in [
                         "gagal login", "tidak bisa login", "ga bisa login", "gk bisa login",
-                        "login error", "error login"])
+                        "login error", "error login", "link nawala", "link kadaluarsa",
+                        "link alternatif invalid", "link alt invalid"])
                     if ai_explicit_login and not gagal_matched:
-                        gagal_matched.append("ai-flag:gagal login dari audit_result")
+                        gagal_matched.append("ai-flag:gagal login/link nawala dari audit_result")
 
-                    # ANTI-FALSE-POSITIVE: kalau member text konteks WD/Depo dan tidak ada konteks login member, skip
                     if gagal_matched and not ai_explicit_login:
                         wd_context_kw = ["wd", "withdraw", "tarik dana", "penarikan", "cairkan",
                                          "deposit", "depo", "setor", "transfer", "top up",
                                          "saldo", "dana", "uang", "duit", "rekening", "belum masuk",
                                          "gak masuk", "ga masuk", "blm masuk", "belom masuk"]
-                        login_context_kw = ["login", "loging", "log in", "masuk akun", "akun saya",
-                                            "password", "username", "user id", "user name", "akses akun",
-                                            "akun terblokir", "akun ke-lock", "akun kena", "akun tidak"]
+                        login_context_kw = ["login", "log in", "akses", "loading", "link alternatif",
+                                            "link alt", "link nawala", "situs", "website", "web"]
                         has_wd_context = any(kw in member_lower for kw in wd_context_kw)
                         has_login_context = any(kw in member_lower for kw in login_context_kw)
                         if has_wd_context and not has_login_context:
-                            self.log(f"⚠️ Gagal-login match tapi konteks WD/Depo (member-only). Skip: {gagal_matched[:2]}")
+                            self.log(f"⚠️ Gagal-login match tapi konteks WD/Depo. Skip: {gagal_matched[:2]}")
                             gagal_matched = []
 
                     is_gagal_login = len(gagal_matched) > 0
 
-                    # --- CEK LUPA PASSWORD ---
+                    # --- CEK LUPA PASSWORD / AKUN TERKUNCI ---
                     lupa_pw_keywords = ["lupa password", "lupa pass", "lupa kata sandi",
                                         "reset password", "reset pass", "ganti password",
                                         "forgot password", "change password", "ubah password",
-                                        "tidak bisa login password", "password salah", "wrong password"]
+                                        "tidak bisa login password", "password salah", "wrong password",
+                                        "akun terkunci", "akun ke lock", "akun kena lock", "akun ke-lock",
+                                        "akun terblokir", "akun kena blokir", "akun diblokir", "akun di blokir",
+                                        "akun suspend", "akun di suspend", "akun banned", "akun di banned"]
                     content_lower = content.lower()
                     is_lupa_password = any(kw in content_lower for kw in lupa_pw_keywords)
 
+                    # --- KIRIM KE GOOGLE SHEET (SEMUA CHAT, 1 TAB PER WEBSITE) ---
+                    file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
+                    # Gunakan tanggal asli chat (bukan datetime.now) agar Yesterday tercatat benar
+                    try:
+                        _chat_dt = datetime.strptime(chat_date, "%Y-%m-%d") if chat_date else datetime.now()
+                    except Exception:
+                        _chat_dt = datetime.now()
+                    _now = datetime.now()
+                    tanggal_jam = f"{_chat_dt.day}/{_chat_dt.month}/{_chat_dt.year}, {_now.strftime('%H.%M.%S')}"
+                    tanggal = f"{_chat_dt.day}/{_chat_dt.month}/{_chat_dt.year}"
+                    tgl = _chat_dt.strftime("%d/%m/%Y")
+
+                    if is_failed:
+                        jenis = "SALAH CS"
+                        keterangan = detail
+                    elif is_sop2 or is_perlu_perbaikan:
+                        jenis = "EVALUASI BOT"
+                        keterangan = detail
+                    elif is_gagal_login:
+                        jenis = "CATAT ID"
+                        keterangan = gagal_matched[0].title() if gagal_matched else "Gagal Login"
+                    elif is_lupa_password:
+                        jenis = "CATAT ID"
+                        keterangan = "LUPA PASSWORD"
+                    else:
+                        jenis = "AMAN"
+                        keterangan = "AMAN"
+
+                    sheet_row = [tanggal_jam, file_id, userid, jenis, keterangan]
+                    threading.Thread(target=self.send_to_google_sheet,
+                                     args=(sheet_row, web_name), daemon=True).start()
+                    self.log(f"📊 Sheet [{web_name}] {jenis}: {userid}")
+
+                    # --- PINDAH FILE ---
                     date_folder = chat_date if chat_date else datetime.now().strftime("%Y-%m-%d")
                     if is_gagal_login:
-                        # Catat ke sheet tab "GAGAL LOGIN"
-                        file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
-                        gagal_detail = gagal_matched[0].title()
-                        gagal_row = [chat_date, chat_time, userid, "GAGAL LOGIN", web_name, gagal_detail, file_id]
-                        self.send_to_google_sheet(gagal_row, "GAGAL LOGIN")
-                        self.log(f"🚫 GAGAL LOGIN/LOADING: {userid} → sheet GAGAL LOGIN")
-                        # Pindah ke folder GAGAL LOGIN
                         gagal_folder = os.path.join(self.local_out, "GAGAL LOGIN", date_folder)
                         if not os.path.exists(gagal_folder): os.makedirs(gagal_folder)
                         try:
                             shutil.move(file_path, os.path.join(gagal_folder, filename))
-                        except Exception as mv_err:
-                            self.log(f"⚠️ Gagal pindah file {filename}: {str(mv_err)[:40]}")
-                    elif is_lupa_password:
-                        # Catat ke sheet tab "LUPA PASSWORD"
-                        file_id = filename.replace("LiveChat_transcript_", "").replace(".txt", "")
-                        lupa_row = [chat_date, chat_time, userid, "LUPA PASSWORD", web_name, "", file_id]
-                        self.send_to_google_sheet(lupa_row, "LUPA PASSWORD")
-                        self.log(f"🔑 LUPA PASSWORD: {userid} → sheet LUPA PASSWORD")
-                        # Pindah ke folder web_name/tanggal seperti biasa
-                        t_folder = os.path.join(self.local_out, web_name, date_folder)
-                        if not os.path.exists(t_folder): os.makedirs(t_folder)
-                        try: shutil.move(file_path, os.path.join(t_folder, filename))
                         except Exception as mv_err:
                             self.log(f"⚠️ Gagal pindah file {filename}: {str(mv_err)[:40]}")
                     else:
@@ -2944,7 +2933,7 @@ Link: {link_str}
             return
 
         target_tab_upper = str(target_tab_name).strip().upper() or "OTHERS"
-        file_id = data_row[-1] if data_row else ""
+        file_id = data_row[1] if len(data_row) > 1 else ""
 
         # Retry 3x untuk handle transient API errors
         last_err = None
@@ -2969,13 +2958,13 @@ Link: {link_str}
                 if worksheet is None:
                     # Belum ada → buat baru dengan nama upper-case
                     worksheet = spreadsheet.add_worksheet(title=target_tab_upper, rows=1000, cols=10)
-                    worksheet.append_row(["Tanggal Chat", "Jam", "UserID", "Status", "Topik", "Detail/Saran", "Filename"])
+                    worksheet.append_row(["Tanggal Analisis", "FILE NAME", "Username", "Pelanggaran", "KETERANGAN"])
                     self.log(f"🆕 GSheet buat tab baru: {target_tab_upper}")
 
                 # Cek duplikat berdasarkan file_id di kolom 7
                 if file_id:
                     try:
-                        existing = worksheet.col_values(7)
+                        existing = worksheet.col_values(2)
                         if file_id in existing:
                             self.log(f"⏭ Sheet skip duplikat: [{target_tab_upper}] {file_id}")
                             return
