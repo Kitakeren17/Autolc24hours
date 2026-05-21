@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 DEFAULT_API_KEYS = ""
 
 # --- VERSI APLIKASI ---
-APP_VERSION = "16.5.3"
+APP_VERSION = "16.5.4"
 
 # --- KONFIGURASI AUTO-UPDATE ---
 GITHUB_OWNER = "Kitakeren17"
@@ -1510,13 +1510,20 @@ class BrowserAuditApp:
         if os.path.isdir(masuk_date_path):
             total += len([f for f in os.listdir(masuk_date_path) if f.endswith(".txt")])
         # Backward compatible: cek juga file di root Data_Chat_Masuk yang belum dipindah
+        # Konversi "YYYY-MM-DD" → "M/D/YYYY" karena format di dalam transcript pakai M/D/YYYY
+        try:
+            _dt = datetime.strptime(date_str, "%Y-%m-%d")
+            alt_date = f"{_dt.month}/{_dt.day}/{_dt.year}"
+        except Exception:
+            alt_date = date_str
         try:
             for f in os.listdir(self.local_in):
                 fpath = os.path.join(self.local_in, f)
                 if f.endswith(".txt") and os.path.isfile(fpath):
                     try:
                         with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                            if date_str in fh.read(500):
+                            content = fh.read(500)
+                            if date_str in content or alt_date in content:
                                 total += 1
                     except: pass
         except: pass
